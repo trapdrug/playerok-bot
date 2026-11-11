@@ -1,0 +1,325 @@
+# Playerok DOM selectors and small behaviour switches.
+# You can edit this file without rebuilding the bot. Restart the container after changes.
+#
+# A selector entry is a mapping with exactly one of:
+#   css: "..."
+#   role: "button" + name: "Текст"
+#   text: "Текст"
+#   placeholder: "Текст"
+#   label: "Текст"
+#   test_id: "..."
+#   xpath: "..."
+# Entries are tried in order. The first visible element wins.
+#
+# Playerok is a Next.js application and periodically changes its DOM. The bot
+# reads sales through the same /graphql endpoint that the site uses (through a
+# Playwright page, so cookies and origin are real). Listing/boost actions use
+# the selectors below and fail safe if a selector is missing.
+
+urls:
+  auth_check: "/profile"
+  sales: "/profile/{username}/sales"
+  deal: "/deal/{id}"
+  item: "/products/{slug}"
+
+session:
+  # If this form is visible, cookies are expired.
+  login_form:
+    - css: 'input[name="email"]'
+    - css: 'form input[autocomplete="email"]'
+  login_page_markers:
+    - text: "Вход или регистрация"
+    - text: "Получить код"
+  # Informational only. Absence of a login form is the primary signal.
+  logged_in_markers:
+    - css: 'a[href^="/profile/"]'
+    - text: "Выйти"
+  username_link:
+    - css: 'a[href^="/profile/"]'
+  exclude_username_segments:
+    - "auth"
+    - "settings"
+    - "wallet"
+    - "sales"
+    - "products"
+    - "purchases"
+    - "reviews"
+    - "automation"
+    - "support"
+    - "admin"
+    - "edit"
+
+errors:
+  captcha_selectors:
+    - css: 'iframe[src*="captcha"]'
+    - css: 'iframe[src*="recaptcha"]'
+    - css: 'iframe[src*="hcaptcha"]'
+    - css: '[class*="captcha"]'
+  captcha_texts:
+    - "Подтвердите, что вы не робот"
+    - "Проверка на робота"
+    - "Я не робот"
+    - "captcha"
+  rate_limit_texts:
+    - "Слишком много запросов"
+    - "Too Many Requests"
+    - "429"
+    - "Попробуйте позже"
+  layout_texts:
+    - "Что-то пошло не так"
+    - "Произошла ошибка"
+    - "Страница не найдена"
+
+graphql:
+  endpoint: "/graphql"
+  sales_page_size: 50
+  # Playerok uses Apollo persisted queries for the sales list. These values
+  # were captured from the live site; update them if Playerok changes the query.
+  deals_operation: "deals"
+  deals_sha256: "ea22de52fe8fe4106c51bfb836e53653527aa19849721b3c941181335c8ee06e"
+  # Chat list operation, captured from /profile/<username>/chats.
+  chats_operation: "userChats"
+  chats_sha256: "c1ddbcd7c8b87160ac25e0734f9dc32fc945287b056f4b14abf1473bfb1ad11a"
+  chats_page_size: 50
+  # Single listing operation (full data of one lot).
+  item_operation: "item"
+  item_sha256: "48d2fe797afc4195cdbc1404b743711998e6f2a4b3b38db9a63bfb4eb8a9536d"
+  # Seller's listings operation (counter of items in sale).
+  items_operation: "items"
+  items_sha256: "3f20c731f8f769a094ee3fa32e09f8e12250357e9a4f0ebb4e6988e7a0bb9260"
+  items_page_size: 16
+  items_active_statuses:
+    - "APPROVED"
+    - "PENDING_MODERATION"
+    - "PENDING_APPROVAL"
+  # ItemDealStatus values that mean "the item has been sold".
+  completed_sale_statuses:
+    - "CONFIRMED"
+    - "COMPLETED"
+    - "PAID"
+    - "SENT"
+    - "SOLD"
+    - "DONE"
+
+sales:
+  # Recommended: read sales from Playerok GraphQL through Playwright.
+  # Set to false to use the DOM fallback below.
+  use_graphql: true
+  cards:
+    - css: 'a[href*="/deal/"]'
+  card_url_attribute: "href"
+  title:
+    - css: "h3"
+    - css: "h4"
+    - css: '[class*="title"]'
+  price:
+    - css: '[class*="price"]'
+    - css: '[data-testid*="price"]'
+  status:
+    - css: '[class*="status"]'
+  completed_status_markers:
+    - "Заверш"
+    - "Продан"
+    - "Оплачен"
+    - "CONFIRMED"
+    - "COMPLETED"
+    - "PAID"
+  empty_markers:
+    - text: "Нет продаж"
+    - text: "Ничего не найдено"
+  load_more:
+    - role: "button"
+      name: "Показать ещё"
+    - role: "button"
+      name: "Загрузить ещё"
+
+relist:
+  # Buttons that duplicate/relist an already sold lot with the same parameters.
+  entry_buttons:
+    - role: "button"
+      name: "Перевыставить"
+    - role: "button"
+      name: "Выставить снова"
+    - role: "button"
+      name: "Продать снова"
+    - text: "Перевыставить"
+    - text: "Выставить снова"
+    - text: "Продать снова"
+  confirm_buttons:
+    - role: "button"
+      name: "Перевыставить"
+    - role: "button"
+      name: "Подтвердить"
+    - role: "button"
+      name: "Да"
+    - role: "button"
+      name: "ОК"
+  item_links:
+    - css: 'a[href*="/products/"]'
+  success_texts:
+    - "Товар выставлен"
+    - "Товар опубликован"
+    - "Объявление создано"
+    - "Успешно выставлено"
+    - "Товар снова в продаже"
+
+boost:
+  # Titles that must never be boosted. A new listing with such a title is
+  # still published, but without premium. Matching is case-insensitive and
+  # works as a substring of the listing name.
+  skip_titles:
+    - "доплата подарка"
+    - "доплата подарок"
+  # Opens the promotion screen of a listing.
+  # "Выставить" is shown for a fresh draft, "Повысить статус" for a regular
+  # listing, "Поднять в топ" for a premium one.
+  entry_buttons:
+    - text: "Выставить"
+      exact: true
+    - text: "Повысить статус"
+      exact: true
+    - text: "Поднять в топ"
+      exact: true
+    - role: "button"
+      name: "Повысить статус"
+    - role: "button"
+      name: "Поднять в топ"
+    - text: "Продвинуть"
+  # The exact premium/priority option inside the promotion modal.
+  premium_options:
+    - css: 'input[name="itemPriority"]'
+    - role: "radio"
+      name: "Премиум"
+    - text: "Премиум"
+    - text: "Premium"
+  # The footer button that starts the payment, e.g.
+  # "Повысить до Премиум за 99 ₽ 149" or "Выставить Премиум за 25 ₽".
+  confirm_buttons:
+    - text: "Выставить Премиум"
+      exact: false
+    - text: "Повысить до Премиум"
+      exact: false
+    - role: "button"
+      name: "Выставить Премиум"
+    - role: "button"
+      name: "Повысить до Премиум"
+  success_texts:
+    - "Премиум"
+    - "Товар продвинут"
+    - "Объявление продвинуто"
+    - "Успешно"
+  close_buttons:
+    - role: "button"
+      name: "Отмена"
+    - role: "button"
+      name: "Закрыть"
+    - css: '[aria-label="Закрыть"]'
+    - css: '[data-testid="modal-close-button"]'
+
+listing:
+  # Publishing a fresh listing without premium. In the promotion modal the
+  # footer button becomes "Выставить бесплатно" when the free "Обычный"
+  # option is selected.
+  free_publish_buttons:
+    - text: "Выставить бесплатно"
+      exact: true
+    - role: "button"
+      name: "Выставить бесплатно"
+  keep_in_sale:
+    - text: "Оставлять в продаже"
+      exact: true
+  free_option_labels:
+    - "Обычный"
+    - "Бесплатно"
+  published_texts:
+    - "В продаже"
+    - "Товар выставлен"
+    - "Товар опубликован"
+    - "Объявление создано"
+    - "На модерации"
+
+payment:
+  dialog:
+    - css: ".MuiModal-root"
+    - role: "dialog"
+    - css: '[role="dialog"]'
+    - css: ".MuiDialog-root"
+    - css: '[class*="modal"]'
+  # The main balance is a switch with providerId=LOCAL. The bot pays only when
+  # this switch is enabled.
+  balance_switch:
+    - css: 'input[name="providerId"][value="LOCAL"]'
+  # Card / SBP / crypto options are never used by the bot.
+  card_radios:
+    - css: 'input[name="providerId"][type="radio"]'
+  balance_labels:
+    - text: "Оплатить с баланса"
+    - css: 'img[alt="balance"]'
+  # Selectors used by the JS evaluator to determine which payment source is selected.
+  checked_source_selectors:
+    - 'input[type="radio"]:checked'
+    - '[role="radio"][aria-checked="true"]'
+    - '[data-state="checked"]'
+    - '[class*="selected"]'
+  source_label_selectors:
+    - "label"
+    - '[role="radio"]'
+    - '[class*="provider"]'
+    - '[class*="payment"]'
+    - "button"
+  # The payment source must be the main balance. If it is not, the bot does not pay.
+  main_balance_markers:
+    - "Основной баланс"
+    - "С основного баланса"
+    - "Оплатить с баланса"
+    - "Баланс"
+  frozen_markers:
+    - "Заморозка"
+    - "В заморозке"
+    - "Заморожен"
+    - "Замороженные"
+    - "Frozen"
+  other_source_markers:
+    - "Банковская карта"
+    - "Карта"
+    - "СБП"
+    - "QIWI"
+    - "ЮMoney"
+    - "Криптовалюта"
+    - "PayPal"
+  price:
+    - css: '[class*="price"]'
+    - css: '[data-testid*="price"]'
+  pay_buttons:
+    - role: "button"
+      name: "Перейти к оплате"
+    - role: "button"
+      name: "Оплатить"
+    - role: "button"
+      name: "Подтвердить"
+    - role: "button"
+      name: "Купить"
+    - role: "button"
+      name: "Продвинуть"
+  cancel_buttons:
+    - role: "button"
+      name: "Отмена"
+    - role: "button"
+      name: "Закрыть"
+    - css: '[aria-label="Закрыть"]'
+    - css: '[data-testid="modal-close-button"]'
+  success_texts:
+    - "Оплачено"
+    - "Успешно оплачено"
+    - "Буст активирован"
+    - "Товар продвинут"
+    - "Объявление продвинуто"
+    - "Товар выставлен"
+    - "Товар опубликован"
+    - "Объявление создано"
+  error_texts:
+    - "Недостаточно средств"
+    - "Не удалось оплатить"
+    - "Ошибка оплаты"
+    - "Платёж отклонён"
+    - "Платеж отклонен"

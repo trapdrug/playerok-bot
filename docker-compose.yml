@@ -1,0 +1,15 @@
+services:
+  bot:
+    build: .
+    container_name: playerok-bot
+    restart: unless-stopped
+    init: true
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - ./selectors.yaml:/app/selectors.yaml:ro
+    shm_size: "1gb"
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 30s

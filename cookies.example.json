@@ -1,0 +1,41 @@
+[
+  {
+    "name": "playerok_session",
+    "value": "eyJpdiI6IlwvS0t6Ym1Yc3c3cF...",
+    "domain": ".playerok.com",
+    "path": "/",
+    "secure": true,
+    "httpOnly": true,
+    "sameSite": "Lax",
+    "expires": 1798765432
+  },
+  {
+    "name": "XSRF-TOKEN",
+    "value": "eyJpdiI6IlwvU0ZSMWt...",
+    "domain": ".playerok.com",
+    "path": "/",
+    "secure": true,
+    "httpOnly": false,
+    "sameSite": "Lax",
+    "expires": 1798765432
+  },
+  {
+    "name": "remember_web_",
+    "value": "eyJpdiI6IlwvRkx3SjJ...",
+    "domain": ".playerok.com",
+    "path": "/",
+    "secure": true,
+    "httpOnly": true,
+    "sameSite": "Lax",
+    "expires": 1798765432
+  },
+  {
+    "name": "locale",
+    "value": "ru",
+    "domain": ".playerok.com",
+    "path": "/",
+    "secure": false,
+    "httpOnly": false,
+    "sameSite": "Lax"
+  }
+]
