@@ -69,6 +69,11 @@ errors:
     - "Что-то пошло не так"
     - "Произошла ошибка"
     - "Страница не найдена"
+  # The anti-bot page that Playerok shows for a fresh IP. It verifies itself
+  # and reloads, so the bot waits and retries instead of failing.
+  challenge_texts:
+    - "Проверка браузера перед переходом"
+    - "Подождите несколько секунд"
 
 graphql:
   endpoint: "/graphql"

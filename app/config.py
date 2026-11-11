@@ -33,6 +33,10 @@ class AppConfig(BaseSettings):
     headless: bool = True
     browser_timeout_ms: int = 45_000
     navigation_timeout_ms: int = 60_000
+    # Playerok shows a "browser verification" page for unknown IP addresses.
+    # The page verifies itself and reloads; the bot waits and retries.
+    challenge_wait_seconds: int = 15
+    challenge_max_attempts: int = 4
     user_agent: str = (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "

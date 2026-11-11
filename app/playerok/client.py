@@ -1841,6 +1841,7 @@ class PlayerokClient:
         if response is not None and response.status == 429:
             raise RateLimitError("Playerok вернул 429")
         await self._check_page_errors(page)
+        await self._wait_for_challenge(page)
         # A freshly created listing may answer "not found" for a short while.
         for _ in range(5):
             body = (await self._body_text(page)).lower()
@@ -1857,6 +1858,42 @@ class PlayerokClient:
                 break
         await self._wait_for_content(page)
         return response
+
+    async def _wait_for_challenge(self, page: Page) -> None:
+        """Wait out the Playerok "browser verification" page.
+
+        Playerok shows this page for an IP it has not seen before. The page
+        verifies the browser and reloads itself, so the bot simply waits and
+        reloads until the real content appears.
+        """
+        markers = [
+            marker.lower()
+            for marker in self.selectors.strings("errors.challenge_texts")
+        ]
+        if not markers:
+            return
+        for attempt in range(self.config.challenge_max_attempts):
+            try:
+                body = (await self._body_text(page)).lower()
+            except Exception:  # noqa: BLE001
+                body = ""
+            if not any(marker in body for marker in markers):
+                return
+            logger.info(
+                "Playerok browser challenge detected (attempt %s), waiting",
+                attempt + 1,
+            )
+            await page.wait_for_timeout(
+                max(5, self.config.challenge_wait_seconds) * 1000
+            )
+            try:
+                await page.reload(
+                    wait_until="domcontentloaded",
+                    timeout=self.config.navigation_timeout_ms,
+                )
+            except Exception:  # noqa: BLE001
+                return
+        logger.warning("Playerok browser challenge did not pass")
 
     @staticmethod
     def _is_network_error(exc: Exception) -> bool:
