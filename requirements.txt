@@ -7,3 +7,5 @@ bcrypt==4.2.1
 pydantic-settings==2.6.1
 PyYAML==6.0.2
 playwright==1.49.1
+# IANA time zone database: required on slim images where the OS has no tzdata.
+tzdata==2024.2
