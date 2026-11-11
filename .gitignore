@@ -11,3 +11,6 @@ venv/
 *.log
 cookies*.json
 !cookies.example.json
+
+# other local projects
+musor-shop/
