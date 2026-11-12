@@ -556,7 +556,12 @@ class PlayerokClient:
                   new File([bytes], 'item' + (index + 1) + '.jpg', {type: mime || 'image/jpeg'})
                 );
               }
-              const response = await fetch(endpoint, {
+              const controller = new AbortController();
+              const timer = setTimeout(() => controller.abort(), 30000);
+              let response;
+              try {
+                response = await fetch(endpoint, {
+                signal: controller.signal,
                 method: 'POST',
                 credentials: 'include',
                 headers: {
@@ -565,6 +570,11 @@ class PlayerokClient:
                 },
                 body: form,
               });
+              } catch (e) {
+                clearTimeout(timer);
+                return {status: 0, text: 'fetch failed: ' + String(e), json: null};
+              }
+              clearTimeout(timer);
               const text = await response.text();
               let json = null;
               try { json = JSON.parse(text); } catch (e) { json = null; }
@@ -1119,11 +1129,21 @@ class PlayerokClient:
         last_error: Exception | None = None
         for attempt in range(2):
             try:
-                return await page.evaluate(script, argument)
+                return await asyncio.wait_for(
+                    page.evaluate(script, argument),
+                    timeout=self.config.browser_timeout_ms / 1000 + 30,
+                )
             except Exception as exc:  # noqa: BLE001
                 last_error = exc
-                if "Execution context was destroyed" not in str(exc):
+                message = str(exc)
+                if (
+                    "Execution context was destroyed" not in message
+                    and "TimeoutError" not in message
+                    and "timed out" not in message.lower()
+                ):
                     raise
+                if "TimeoutError" in message or "timed out" in message.lower():
+                    logger.warning("Page evaluate timed out, retrying")
                 logger.info("GraphQL call interrupted by navigation, retrying")
                 await page.wait_for_timeout(1200)
                 await self._ensure_origin(page)
@@ -1153,12 +1173,22 @@ class PlayerokClient:
               }
               const body = {query, variables};
               if (operationName) body.operationName = operationName;
-              const response = await fetch(endpoint, {
+              const controller = new AbortController();
+              const timer = setTimeout(() => controller.abort(), 30000);
+              let response;
+              try {
+                response = await fetch(endpoint, {
+                signal: controller.signal,
                 method: 'POST',
                 credentials: 'include',
                 headers,
                 body: JSON.stringify(body)
               });
+              } catch (e) {
+                clearTimeout(timer);
+                return {status: 0, text: 'fetch failed: ' + String(e), json: null};
+              }
+              clearTimeout(timer);
               const text = await response.text();
               let json = null;
               try { json = JSON.parse(text); } catch (e) { json = null; }
@@ -1179,7 +1209,11 @@ class PlayerokClient:
             raise RateLimitError("GraphQL: 429")
         payload = result.get("json")
         if not isinstance(payload, dict):
-            raise PlayerokError(f"GraphQL: некорректный ответ HTTP {status}")
+            detail = truncate(str(result.get("text") or ""), 200)
+            raise PlayerokError(
+                f"GraphQL: некорректный ответ HTTP {status}"
+                + (f" ({detail})" if detail else "")
+            )
         errors = payload.get("errors")
         if errors:
             messages = " ".join(
@@ -1219,7 +1253,12 @@ class PlayerokClient:
                   persistedQuery: {version: 1, sha256Hash}
                 })
               });
-              const response = await fetch(endpoint + '?' + params.toString(), {
+              const controller = new AbortController();
+              const timer = setTimeout(() => controller.abort(), 30000);
+              let response;
+              try {
+                response = await fetch(endpoint + '?' + params.toString(), {
+                signal: controller.signal,
                 method: 'GET',
                 credentials: 'include',
                 headers: {
@@ -1227,6 +1266,11 @@ class PlayerokClient:
                   'x-apollo-operation-name': operationName
                 }
               });
+              } catch (e) {
+                clearTimeout(timer);
+                return {status: 0, text: 'fetch failed: ' + String(e), json: null};
+              }
+              clearTimeout(timer);
               const text = await response.text();
               let json = null;
               try { json = JSON.parse(text); } catch (e) { json = null; }
@@ -1247,7 +1291,11 @@ class PlayerokClient:
             raise RateLimitError("GraphQL: 429")
         payload = result.get("json")
         if not isinstance(payload, dict):
-            raise PlayerokError(f"GraphQL: некорректный ответ HTTP {status}")
+            detail = truncate(str(result.get("text") or ""), 200)
+            raise PlayerokError(
+                f"GraphQL: некорректный ответ HTTP {status}"
+                + (f" ({detail})" if detail else "")
+            )
         errors = payload.get("errors")
         if errors:
             messages = " ".join(
