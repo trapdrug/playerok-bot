@@ -506,8 +506,8 @@ class PlayerokClient:
             raise LayoutChangedError("Не удалось определить цену товара")
 
         await self._before_action()
-        if item.slug:
-            await self._goto(page, self._absolute(self.selectors.url("item", slug=item.slug)))
+        # The listing data is already read through the API, so the heavy item
+        # page does not have to be loaded at all.
 
         images: list[tuple[str, str]] = []
         for url in item.attachment_urls[:3]:
@@ -518,8 +518,6 @@ class PlayerokClient:
                 body = await response.body()
                 if not body:
                     continue
-                import base64
-
                 images.append(
                     (
                         base64.b64encode(body).decode("ascii"),
@@ -577,11 +575,11 @@ class PlayerokClient:
             "operations": json.dumps(operations),
             "map": json.dumps(map_data),
         }
-        for index, (base64, mime) in enumerate(images):
+        for index, (encoded, mime) in enumerate(images):
             multipart[str(index + 1)] = {
                 "name": f"item{index + 1}.jpg",
                 "mimeType": mime or "image/jpeg",
-                "buffer": base64.b64decode(base64),
+                "buffer": base64.b64decode(encoded),
             }
         result = await self._run_graphql_request(
             page,
@@ -1348,23 +1346,9 @@ class PlayerokClient:
         if item.status and item.status.upper() != "DRAFT":
             return True
 
-        entry = await self._find_visible(page, "boost.entry_buttons", timeout_ms=15000)
-        if entry is None:
-            raise LayoutChangedError(
-                "Кнопка публикации не найдена. Проверьте boost.entry_buttons "
-                "в selectors.yaml."
-            )
-        await self._before_action()
-        await self._safe_click(entry)
-        modal = await self._wait_for_modal(page)
-        if modal is None:
-            raise LayoutChangedError(
-                "Окно продвижения не открылось, объявление осталось черновиком"
-            )
-
-        # The id of the free ("Обычный") priority is read from the modal.
-        priority_id = await self._free_priority_id(page)
-        await self._close_dialog(page, modal)
+        # The free ("Обычный") priority is read through the API, so the heavy
+        # item page does not have to be opened at all.
+        priority_id = await self._free_priority_id(page, item)
         if not priority_id or not item.id:
             # Fallback: publish through the modal button.
             return await self._publish_listing_via_ui(page, lot_url)
@@ -1449,44 +1433,63 @@ class PlayerokClient:
         body = (await self._body_text(page)).lower()
         return "черновик" not in body
 
-    async def _free_priority_id(self, page: Page) -> str | None:
-        """Read the id of the free ("Обычный") priority from the modal."""
-        markers = self.selectors.strings("listing.free_option_labels") or [
-            "Обычный",
-            "Бесплатно",
-        ]
-        deadline = asyncio.get_running_loop().time() + 15
-        while asyncio.get_running_loop().time() < deadline:
-            try:
-                value = await self._evaluate_with_retry(
-                    page,
-                    """
-                    (args) => {
-                      const radios = Array.from(
-                        document.querySelectorAll('input[name="itemPriority"]')
-                      );
-                      const free = radios.find((el) => {
-                        const label = el.closest('label');
-                        const text = label ? (label.innerText || '').trim() : '';
-                        return args.markers.some(
-                          (marker) => text.startsWith(marker)
-                        );
-                      });
-                      if (!free) return '';
-                      const value = free.getAttribute('value') || '';
-                      if (!free.checked) {
-                        free.click();
-                      }
-                      return value;
-                    }
-                    """,
-                    {"markers": list(markers)},
-                )
-            except Exception:  # noqa: BLE001
-                value = ""
-            if value:
-                return str(value)
-            await page.wait_for_timeout(1000)
+    async def _free_priority_id(self, page: Page, item: ItemInfo) -> str | None:
+        """Return the id of the free ("Обычный") priority of a listing."""
+        operation = str(
+            self.selectors.get("graphql.item_priority_operation", "itemPriorityStatuses")
+        )
+        sha256_hash = str(
+            self.selectors.get("graphql.item_priority_sha256", "") or ""
+        )
+        if not sha256_hash or not item.id:
+            return None
+        try:
+            data = await self._graphql_persisted(
+                page,
+                operation,
+                {"itemId": item.id, "price": int(item.price or 0)},
+                sha256_hash,
+            )
+        except PlayerokError as exc:
+            logger.warning("Cannot read the priority options: %s", exc)
+            return None
+        statuses = data.get("itemPriorityStatuses")
+        if not isinstance(statuses, list):
+            return None
+        for entry in statuses:
+            if not isinstance(entry, dict):
+                continue
+            if str(entry.get("type") or "").upper() == "DEFAULT":
+                return str(entry.get("id") or "") or None
+        return None
+
+    async def _premium_price(self, page: Page, item: ItemInfo) -> Decimal | None:
+        """Return the price of the premium promotion for a listing."""
+        operation = str(
+            self.selectors.get("graphql.item_priority_operation", "itemPriorityStatuses")
+        )
+        sha256_hash = str(
+            self.selectors.get("graphql.item_priority_sha256", "") or ""
+        )
+        if not sha256_hash or not item.id:
+            return None
+        try:
+            data = await self._graphql_persisted(
+                page,
+                operation,
+                {"itemId": item.id, "price": int(item.price or 0)},
+                sha256_hash,
+            )
+        except PlayerokError:
+            return None
+        statuses = data.get("itemPriorityStatuses")
+        if not isinstance(statuses, list):
+            return None
+        for entry in statuses:
+            if not isinstance(entry, dict):
+                continue
+            if str(entry.get("type") or "").upper() == "PREMIUM":
+                return parse_money(entry.get("price"))
         return None
 
     async def _wait_for_modal(
