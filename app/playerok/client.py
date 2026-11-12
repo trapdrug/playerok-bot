@@ -108,6 +108,19 @@ mutation publishItem($input: PublishItemInput!) {
 }
 """.strip()
 
+# Buying the premium for a listing that is already on sale.
+INCREASE_PRIORITY_QUERY = """
+mutation increaseItemPriorityStatus($input: PublishItemInput!) {
+  increaseItemPriorityStatus(input: $input) {
+    id
+    slug
+    status
+    priority
+    __typename
+  }
+}
+""".strip()
+
 
 @dataclass(slots=True)
 class SessionInfo:
@@ -1481,27 +1494,105 @@ class PlayerokClient:
         if isinstance(published, dict):
             status = str(published.get("status") or "").upper()
             priority = str(published.get("priority") or "").upper()
-        if status and status != "DRAFT":
+        if not status or status == "DRAFT":
+            after = await self._wait_for_item(page, slug, timeout_ms=30000)
+            if after is None or not after.status or after.status.upper() == "DRAFT":
+                return BoostOutcome(
+                    status="deferred",
+                    amount=premium_price,
+                    source="main",
+                    reason="Объявление осталось черновиком",
+                )
+
+        if not premium:
             return BoostOutcome(
                 status="success",
-                amount=premium_price if premium else None,
+                amount=None,
                 source="main",
                 reason=None,
             )
 
-        after = await self._wait_for_item(page, slug, timeout_ms=30000)
-        if after is not None and after.status and after.status.upper() != "DRAFT":
+        # The premium is bought separately and its result is verified.
+        if premium_id is None:
             return BoostOutcome(
-                status="success",
-                amount=premium_price if premium else None,
+                status="deferred",
+                amount=None,
                 source="main",
-                reason=None,
+                reason="Premium недоступен для этого товара",
+            )
+        bought = await self.increase_priority(page, item.id, premium_id)
+        if bought.status != "success":
+            return bought
+        if bought.amount is None:
+            bought.amount = premium_price
+        return bought
+
+    async def increase_priority(
+        self,
+        page: Page,
+        item_id: str,
+        priority_id: str,
+        *,
+        keep_in_sale: bool = False,
+    ) -> BoostOutcome:
+        """Buy the premium for a listing that is already published.
+
+        The money is taken from the main balance of the profile.
+        """
+        data: dict[str, Any] | None = None
+        last_error: str | None = None
+        for _ in range(3):
+            try:
+                data = await self._graphql(
+                    page,
+                    INCREASE_PRIORITY_QUERY,
+                    {
+                        "input": {
+                            "priorityStatuses": [priority_id],
+                            "transactionProviderId": "LOCAL",
+                            "transactionProviderData": {"paymentMethodId": None},
+                            "itemId": item_id,
+                            "keepInSale": keep_in_sale,
+                        }
+                    },
+                    operation_name="increaseItemPriorityStatus",
+                )
+                break
+            except PlayerokError as exc:
+                last_error = truncate(str(exc), 300)
+                logger.warning("increaseItemPriorityStatus failed (%s)", exc)
+                await page.wait_for_timeout(10000)
+        if data is None:
+            return BoostOutcome(
+                status="deferred",
+                amount=None,
+                source="main",
+                reason=last_error or "Playerok не принял покупку премиума",
+            )
+        result = data.get("increaseItemPriorityStatus")
+        if not isinstance(result, dict):
+            return BoostOutcome(
+                status="deferred",
+                amount=None,
+                source="main",
+                reason="Playerok не вернул результат покупки премиума",
+            )
+        priority = str(result.get("priority") or "").upper()
+        if priority and priority != "PREMIUM":
+            return BoostOutcome(
+                status="deferred",
+                amount=None,
+                source="main",
+                reason=(
+                    "Playerok не применил премиум "
+                    f"(статус {priority or 'неизвестен'})"
+                ),
             )
         return BoostOutcome(
-            status="deferred",
-            amount=premium_price,
+            status="success",
+            amount=None,
             source="main",
-            reason="Объявление осталось черновиком",
+            reason=None,
         )
 
     async def _priority_options(
