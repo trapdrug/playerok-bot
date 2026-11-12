@@ -527,7 +527,10 @@ class AutomationService:
             raise
         except PlayerokError as exc:
             message = truncate(str(exc), 900)
-            await self._set_sale_fields(sale.id, error=message)
+            await self._set_sale_fields(
+                sale.id, boost_state="publish_failed", error=message
+            )
+            sale.boost_state = "publish_failed"
             await self.audit.log(
                 "publish_failed", f"Сделка {sale.external_id}: {message}"
             )
@@ -538,11 +541,14 @@ class AutomationService:
 
         if not published:
             await self._set_sale_fields(
-                sale.id, error="Объявление осталось черновиком"
+                sale.id,
+                boost_state="publish_failed",
+                error="Объявление осталось черновиком",
             )
+            sale.boost_state = "publish_failed"
             await self.notifications.generic_error(
                 "Новое объявление не удалось опубликовать — оно осталось "
-                "черновиком. Проверьте аккаунт вручную."
+                "черновиком. Бот повторит публикацию через пару минут."
             )
             return
 
