@@ -93,6 +93,10 @@ graphql:
   items_operation: "items"
   items_sha256: "3f20c731f8f769a094ee3fa32e09f8e12250357e9a4f0ebb4e6988e7a0bb9260"
   items_page_size: 16
+  # The available balance of the profile (used to measure the real premium
+  # price as the difference before and after the purchase).
+  balance_operation: "viewerLocalBalance"
+  balance_sha256: "836ba5f37fd9377acacdfe93b879566f87791f8119704ee6844382af69248d48"
   # Available priority options of a listing (used to publish without
   # premium and to read the premium price).
   item_priority_operation: "itemPriorityStatuses"

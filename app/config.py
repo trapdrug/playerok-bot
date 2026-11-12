@@ -33,9 +33,13 @@ class AppConfig(BaseSettings):
     headless: bool = True
     browser_timeout_ms: int = 45_000
     navigation_timeout_ms: int = 60_000
-    # The Playerok pages are heavy. The bot works with the DOM and the API,
-    # so pictures can be skipped - this saves a lot of memory.
-    block_images: bool = True
+    # The Playerok pages are heavy, but with a normal amount of RAM the bot can
+    # work with the full pages (pictures included).
+    block_images: bool = False
+    # A cycle must never hang forever: it is aborted and retried.
+    cycle_timeout_seconds: int = 300
+    # How often the browser is restarted (releases memory and stuck pages).
+    browser_restart_cycles: int = 5
     # Playerok shows a "browser verification" page for unknown IP addresses.
     # The page verifies itself and reloads; the bot waits and retries.
     challenge_wait_seconds: int = 15

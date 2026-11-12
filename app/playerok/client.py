@@ -213,12 +213,9 @@ class PlayerokClient:
                         "--no-sandbox",
                         "--disable-dev-shm-usage",
                         "--disable-blink-features=AutomationControlled",
-                        # Keep the memory footprint small: the service has
-                        # about 1 GB and a heavy page can crash the renderer.
+                        # The service has enough RAM, so the browser works
+                        # with its normal settings.
                         "--disable-gpu",
-                        "--renderer-process-limit=2",
-                        "--js-flags=--max-old-space-size=192",
-                        "--disable-features=site-per-process,TranslateUI",
                         "--disable-extensions",
                         "--disable-background-networking",
                         "--disable-backgrounding-occluded-windows",
@@ -236,10 +233,9 @@ class PlayerokClient:
     async def close(self) -> None:
         async with self._browser_lock:
             if self._browser is not None:
-                try:
-                    await asyncio.wait_for(self._browser.close(), timeout=30)
-                except Exception:  # noqa: BLE001
-                    pass
+                await self._run_with_timeout(
+                    self._browser.close(), 30, "browser.close"
+                )
                 self._browser = None
             if self._playwright is not None:
                 try:
@@ -284,16 +280,11 @@ class PlayerokClient:
             page.on("dialog", self._handle_dialog)
             yield page
         finally:
-            try:
-                await asyncio.wait_for(context.close(), timeout=30)
-            except Exception:  # noqa: BLE001
-                # A stuck page must not freeze the whole cycle.
-                logger.warning("Browser context did not close, closing browser")
-                try:
-                    if self._browser is not None:
-                        await asyncio.wait_for(self._browser.close(), timeout=30)
-                except Exception:  # noqa: BLE001
-                    pass
+            await self._run_with_timeout(context.close(), 30, "context.close")
+            if self._browser is not None and not self._browser.is_connected():
+                logger.warning("Browser was closed with the context")
+                async with self._browser_lock:
+                    self._browser = None
 
     @staticmethod
     async def _handle_dialog(dialog) -> None:  # noqa: ANN001
@@ -842,6 +833,29 @@ class PlayerokClient:
             reason=None,
         )
 
+    async def fetch_balance(self, page: Page) -> Decimal | None:
+        """Return the available balance of the profile."""
+        operation = str(
+            self.selectors.get("graphql.balance_operation", "viewerLocalBalance")
+        )
+        sha256_hash = str(
+            self.selectors.get("graphql.balance_sha256", "") or ""
+        )
+        if not sha256_hash:
+            return None
+        try:
+            data = await self._graphql_persisted(page, operation, {}, sha256_hash)
+        except PlayerokError as exc:
+            logger.warning("Cannot read the balance: %s", exc)
+            return None
+        viewer = data.get("viewer")
+        if not isinstance(viewer, dict):
+            return None
+        balance = viewer.get("balance")
+        if not isinstance(balance, dict):
+            return None
+        return parse_money(balance.get("available"))
+
     async def fetch_items_count(self, page: Page, user_id: str) -> int | None:
         """Return the number of the seller's listings that are on sale."""
         operation = str(self.selectors.get("graphql.items_operation", "items"))
@@ -1188,6 +1202,25 @@ class PlayerokClient:
                 multipart=multipart,
             )
         return {"status": status, "text": text[:4000], "json": payload}
+
+    async def _run_with_timeout(
+        self,
+        awaitable: Any,
+        timeout: float,
+        label: str,
+    ) -> Any:
+        """Await something with a timeout, abandoning it if it gets stuck.
+
+        Playwright does not always react to cancellation, so the inner task is
+        shielded: on timeout it is simply abandoned.
+        """
+        task = asyncio.ensure_future(awaitable)
+        try:
+            return await asyncio.wait_for(asyncio.shield(task), timeout=timeout)
+        except asyncio.TimeoutError:
+            task.cancel()
+            logger.warning("%s did not finish in %ss", label, timeout)
+            return None
 
     async def _evaluate_with_retry(
         self, page: Page, script: str, argument: dict[str, Any]
@@ -2150,10 +2183,9 @@ class PlayerokClient:
         """Close the browser so the next cycle starts with a fresh one."""
         async with self._browser_lock:
             if self._browser is not None:
-                try:
-                    await asyncio.wait_for(self._browser.close(), timeout=20)
-                except Exception:  # noqa: BLE001
-                    pass
+                await self._run_with_timeout(
+                    self._browser.close(), 20, "browser.close"
+                )
                 self._browser = None
 
     @staticmethod
@@ -2185,6 +2217,9 @@ class PlayerokClient:
             try:
                 text = await self._body_text(page)
             except Exception:  # noqa: BLE001
+                await page.wait_for_timeout(300)
+                continue
+            if text is None:
                 await page.wait_for_timeout(300)
                 continue
             if len(text) > 300:

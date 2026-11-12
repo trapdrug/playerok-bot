@@ -84,6 +84,7 @@ class AutomationService:
         self._stop_event = asyncio.Event()
         self._no_cookies_notified = False
         self._chat_error_notified = False
+        self._cycles_since_restart = 0
 
         # Let the Playwright client abort long actions when /stop is pressed.
         self.client.set_stop_check(self._stop_requested)
@@ -113,8 +114,20 @@ class AutomationService:
             return
 
         async with self._lock:
+            task = asyncio.ensure_future(self._run_cycle_locked())
             try:
-                await self._run_cycle_locked()
+                # The cycle is shielded: on timeout it is abandoned instead of
+                # blocking the scheduler forever.
+                await asyncio.wait_for(
+                    asyncio.shield(task),
+                    timeout=self.config.cycle_timeout_seconds,
+                )
+            except asyncio.TimeoutError:
+                task.cancel()
+                logger.warning(
+                    "Cycle exceeded %ss and was aborted",
+                    self.config.cycle_timeout_seconds,
+                )
             except StopRequestedError:
                 logger.info("Automation cycle stopped by request")
             except SessionExpiredError as exc:
@@ -211,9 +224,12 @@ class AutomationService:
                 await self._process_pending_publishes(page)
                 await self._process_pending_boosts(page)
         finally:
-            # A fresh browser for every cycle releases the memory of the
-            # previous one (the service has about 1 GB in total).
-            await self.client.restart_browser()
+            # A fresh browser every few cycles keeps the memory and the page
+            # state clean without paying the start-up cost every time.
+            self._cycles_since_restart += 1
+            if self._cycles_since_restart >= self.config.browser_restart_cycles:
+                self._cycles_since_restart = 0
+                await self.client.restart_browser()
 
     async def _store_baseline(self, sales: list[SaleInfo]) -> None:
         inserted = 0
@@ -524,6 +540,7 @@ class AutomationService:
         """Publish a fresh listing through the API, with premium if allowed."""
         settings = await self.settings.get()
         max_amount = Decimal(settings.max_boost_amount or 0)
+        balance_before = await self.client.fetch_balance(page)
         try:
             outcome = await self.client.publish_listing(
                 page,
@@ -549,6 +566,14 @@ class AutomationService:
             return
 
         if outcome.status == "success":
+            balance_after = await self.client.fetch_balance(page)
+            if (
+                balance_before is not None
+                and balance_after is not None
+                and balance_before > balance_after
+            ):
+                # The real price of the premium is the balance difference.
+                outcome.amount = balance_before - balance_after
             if outcome.amount:
                 # The premium was bought with the main balance.
                 await self._set_sale_fields(

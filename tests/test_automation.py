@@ -122,6 +122,9 @@ class FakeClient:
     async def restart_browser(self):
         return None
 
+    async def fetch_balance(self, page):
+        return Decimal("100.00")
+
     async def apply_boost(
         self,
         page,
