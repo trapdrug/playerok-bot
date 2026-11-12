@@ -1346,8 +1346,8 @@ class PlayerokClient:
         exceeded: the listing still goes on sale, only without premium.
         """
         await self._before_action()
-        await self._goto(page, lot_url)
-        await self._dismiss_cookie_banner(page)
+        # The publication goes through the API, so the heavy listing page is
+        # not opened at all (it used to crash the browser on a small service).
 
         slug = lot_url.rstrip("/").split("/")[-1]
         item = await self._wait_for_item(page, slug)
