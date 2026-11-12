@@ -1154,10 +1154,12 @@ class PlayerokClient:
                         fail_on_status_code=False,
                     )
                 else:
+                    request_headers = dict(headers or {})
+                    request_headers.setdefault("content-type", "application/json")
                     response = await request.post(
                         url,
                         data=json.dumps(json_body or {}),
-                        headers=headers,
+                        headers=request_headers,
                         timeout=self.config.browser_timeout_ms,
                         fail_on_status_code=False,
                     )
