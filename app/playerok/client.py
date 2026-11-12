@@ -223,7 +223,7 @@ class PlayerokClient:
         async with self._browser_lock:
             if self._browser is not None:
                 try:
-                    await self._browser.close()
+                    await asyncio.wait_for(self._browser.close(), timeout=30)
                 except Exception:  # noqa: BLE001
                     pass
                 self._browser = None
@@ -260,9 +260,15 @@ class PlayerokClient:
             yield page
         finally:
             try:
-                await context.close()
+                await asyncio.wait_for(context.close(), timeout=30)
             except Exception:  # noqa: BLE001
-                pass
+                # A stuck page must not freeze the whole cycle.
+                logger.warning("Browser context did not close, closing browser")
+                try:
+                    if self._browser is not None:
+                        await asyncio.wait_for(self._browser.close(), timeout=30)
+                except Exception:  # noqa: BLE001
+                    pass
 
     @staticmethod
     async def _handle_dialog(dialog) -> None:  # noqa: ANN001

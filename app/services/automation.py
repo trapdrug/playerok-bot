@@ -170,6 +170,7 @@ class AutomationService:
         was_alive = previous_status.is_alive
 
         async with self.client.page_session(cookies) as page:
+            logger.info("Cycle: checking the Playerok session")
             session = await self.client.check_session(page)
             await self.cookies.mark_checked(True)
             self._no_cookies_notified = False
@@ -178,6 +179,7 @@ class AutomationService:
                     "session_restored", "Сессия Playerok снова активна"
                 )
 
+            logger.info("Cycle: polling chats")
             await self._poll_chats(page, session)
 
             if session.user_id:
@@ -193,6 +195,7 @@ class AutomationService:
                     if items_count is not None:
                         await self.settings.set_items_in_sale(items_count)
 
+            logger.info("Cycle: fetching sales")
             sales = await self.client.fetch_sales(
                 page, session.username, session.user_id
             )
