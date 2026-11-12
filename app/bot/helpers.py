@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import CallbackQuery, Message
 
 from app.models import User
@@ -87,6 +88,26 @@ async def require_automation_cb(
     return True
 
 
+async def safe_answer(
+    callback: CallbackQuery,
+    text: str | None = None,
+    *,
+    show_alert: bool = False,
+) -> None:
+    """Answer a callback query and ignore stale ones.
+
+    Telegram rejects answers to callback queries that are older than a few
+    minutes with "query is too old and response timeout expired". That is not
+    an error of the bot, so it is only logged.
+    """
+    try:
+        await callback.answer(text, show_alert=show_alert)
+    except TelegramBadRequest as exc:
+        logger.debug("Callback answer was rejected: %s", exc)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Callback answer failed: %s", exc)
+
+
 __all__ = [
     "LOGIN_HINT",
     "WORKER_DENIED",
@@ -96,6 +117,7 @@ __all__ = [
     "require_automation_cb",
     "require_user",
     "require_user_cb",
+    "safe_answer",
     "safe_delete",
     "safe_delete_callback",
 ]

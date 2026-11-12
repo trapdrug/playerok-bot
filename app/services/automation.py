@@ -169,43 +169,50 @@ class AutomationService:
         previous_status = await self.cookies.status()
         was_alive = previous_status.is_alive
 
-        async with self.client.page_session(cookies) as page:
-            logger.info("Cycle: checking the Playerok session")
-            session = await self.client.check_session(page)
-            await self.cookies.mark_checked(True)
-            self._no_cookies_notified = False
-            if was_alive is False:
-                await self.audit.log(
-                    "session_restored", "Сессия Playerok снова активна"
-                )
-
-            logger.info("Cycle: polling chats")
-            await self._poll_chats(page, session)
-
-            if session.user_id:
-                try:
-                    items_count = await self.client.fetch_items_count(
-                        page, session.user_id
+        try:
+            async with self.client.page_session(cookies) as page:
+                logger.info("Cycle: checking the Playerok session")
+                session = await self.client.check_session(page)
+                await self.cookies.mark_checked(True)
+                self._no_cookies_notified = False
+                if was_alive is False:
+                    await self.audit.log(
+                        "session_restored", "Сессия Playerok снова активна"
                     )
-                except (SessionExpiredError, RateLimitError, CaptchaError):
-                    raise
-                except PlayerokError as exc:
-                    logger.warning("Cannot read the number of items: %s", exc)
-                else:
-                    if items_count is not None:
-                        await self.settings.set_items_in_sale(items_count)
 
-            logger.info("Cycle: fetching sales")
-            sales = await self.client.fetch_sales(
-                page, session.username, session.user_id
-            )
-            if not settings.sales_initialized:
-                await self._store_baseline(sales)
-                return
+                logger.info("Cycle: polling chats")
+                await self._poll_chats(page, session)
 
-            await self._process_unfinished_sales(page)
-            await self._process_new_sales(page, sales)
-            await self._process_pending_boosts(page)
+                if session.user_id:
+                    try:
+                        items_count = await self.client.fetch_items_count(
+                            page, session.user_id
+                        )
+                    except (SessionExpiredError, RateLimitError, CaptchaError):
+                        raise
+                    except PlayerokError as exc:
+                        logger.warning(
+                            "Cannot read the number of items: %s", exc
+                        )
+                    else:
+                        if items_count is not None:
+                            await self.settings.set_items_in_sale(items_count)
+
+                logger.info("Cycle: fetching sales")
+                sales = await self.client.fetch_sales(
+                    page, session.username, session.user_id
+                )
+                if not settings.sales_initialized:
+                    await self._store_baseline(sales)
+                    return
+
+                await self._process_unfinished_sales(page)
+                await self._process_new_sales(page, sales)
+                await self._process_pending_boosts(page)
+        finally:
+            # A fresh browser for every cycle releases the memory of the
+            # previous one (the service has about 1 GB in total).
+            await self.client.restart_browser()
 
     async def _store_baseline(self, sales: list[SaleInfo]) -> None:
         inserted = 0

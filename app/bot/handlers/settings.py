@@ -14,6 +14,7 @@ from app.bot.helpers import (
     require_automation_cb,
     require_user,
     require_user_cb,
+    safe_answer,
 )
 from app.bot.keyboards import dry_run_confirm, settings_menu
 from app.bot.texts import build_settings_text
@@ -78,7 +79,7 @@ async def cb_settings(
 ) -> None:
     if not await require_user_cb(callback, user):
         return
-    await callback.answer()
+    await safe_answer(callback)
     settings = await ctx.settings.get()
     await edit_settings(callback, settings, user)
 
@@ -99,9 +100,9 @@ async def cb_toggle(
                 user, not user.notifications_enabled
             )
         except AuthError as exc:
-            await callback.answer(html.escape(exc.message), show_alert=True)
+            await safe_answer(callback, html.escape(exc.message), show_alert=True)
             return
-        await callback.answer(
+        await safe_answer(callback, 
             "🔔 Включены" if updated_user.notifications_enabled else "🔕 Выключены"
         )
         settings = await ctx.settings.get()
@@ -109,13 +110,13 @@ async def cb_toggle(
         return
 
     if user is not None and not user.can_manage_automation:
-        await callback.answer(
+        await safe_answer(callback, 
             "Работнику доступны только личные уведомления.", show_alert=True
         )
         return
 
     if feature not in FEATURE_LABELS:
-        await callback.answer("Неизвестная настройка", show_alert=True)
+        await safe_answer(callback, "Неизвестная настройка", show_alert=True)
         return
 
     current = await ctx.settings.get()
@@ -123,17 +124,17 @@ async def cb_toggle(
 
     if feature == "dry_run" and not new_value:
         if not user.is_main_admin:
-            await callback.answer(
+            await safe_answer(callback, 
                 "Только главный администратор может включить LIVE-режим.",
                 show_alert=True,
             )
             return
-        await callback.answer()
+        await safe_answer(callback)
         await edit_settings(callback, current, user, confirm_live=True)
         return
 
     updated, value = await ctx.settings.toggle(feature, actor=user)
-    await callback.answer("Включено" if value else "Выключено")
+    await safe_answer(callback, "Включено" if value else "Выключено")
     await edit_settings(callback, updated, user)
 
     if (
@@ -155,7 +156,7 @@ async def cb_stop_all(
     if not await require_automation_cb(callback, user):
         return
     await ctx.automation.request_stop("Команда из меню: Стоп всё", actor=user)
-    await callback.answer("Все задачи остановлены", show_alert=True)
+    await safe_answer(callback, "Все задачи остановлены", show_alert=True)
     settings = await ctx.settings.get()
     await edit_settings(callback, settings, user)
 
@@ -304,7 +305,7 @@ async def cb_dryrun_confirm_off(
         "Проверьте /limit и /status.",
         critical=True,
     )
-    await callback.answer("LIVE-режим включён", show_alert=True)
+    await safe_answer(callback, "LIVE-режим включён", show_alert=True)
     settings = await ctx.settings.get()
     await edit_settings(callback, settings, user)
 

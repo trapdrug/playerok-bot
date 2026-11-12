@@ -8,7 +8,7 @@ from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
-from app.bot.helpers import require_automation, require_automation_cb, require_user, require_user_cb
+from app.bot.helpers import require_automation, require_automation_cb, require_user, require_user_cb, safe_answer
 from app.bot.keyboards import back_menu, main_menu
 from app.bot.texts import (
     WELCOME_TEXT,
@@ -91,7 +91,7 @@ async def cb_status(
 ) -> None:
     if not await require_automation_cb(callback, user):
         return
-    await callback.answer()
+    await safe_answer(callback)
     await edit_or_send(callback, await status_text(ctx, user), back_menu())
 
 
@@ -101,7 +101,7 @@ async def cb_logs(
 ) -> None:
     if not await require_automation_cb(callback, user):
         return
-    await callback.answer()
+    await safe_answer(callback)
     logs = await ctx.audit.recent(20)
     await edit_or_send(
         callback, build_logs_text(logs, ctx.config.timezone), back_menu()
@@ -113,9 +113,9 @@ async def cb_back(
     callback: CallbackQuery, user: User | None
 ) -> None:
     if user is None:
-        await callback.answer("Сначала войдите в аккаунт", show_alert=True)
+        await safe_answer(callback, "Сначала войдите в аккаунт", show_alert=True)
         return
-    await callback.answer()
+    await safe_answer(callback)
     await edit_or_send(
         callback,
         "Главное меню:",
@@ -125,7 +125,7 @@ async def cb_back(
 
 @router.callback_query(F.data == "noop")
 async def cb_noop(callback: CallbackQuery) -> None:
-    await callback.answer()
+    await safe_answer(callback)
 
 
 @router.message(Command("cancel"))

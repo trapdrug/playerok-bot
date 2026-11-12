@@ -212,6 +212,18 @@ class PlayerokClient:
                         "--no-sandbox",
                         "--disable-dev-shm-usage",
                         "--disable-blink-features=AutomationControlled",
+                        # Keep the memory footprint small: the service has
+                        # about 1 GB and a heavy page can crash the renderer.
+                        "--disable-gpu",
+                        "--renderer-process-limit=2",
+                        "--js-flags=--max-old-space-size=192",
+                        "--disable-features=site-per-process,TranslateUI",
+                        "--disable-extensions",
+                        "--disable-background-networking",
+                        "--disable-backgrounding-occluded-windows",
+                        "--disable-renderer-backgrounding",
+                        "--disable-ipc-flooding-protection",
+                        "--mute-audio",
                     ],
                 )
             except Exception as exc:  # noqa: BLE001
@@ -254,6 +266,17 @@ class PlayerokClient:
             await context.add_init_script(
                 "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
             )
+            if self.config.block_images:
+                # Pictures are the biggest memory consumer on the Playerok
+                # pages and the bot does not need them.
+                await context.route(
+                    "**/*",
+                    lambda route: asyncio.ensure_future(
+                        route.abort()
+                        if route.request.resource_type == "image"
+                        else route.continue_()
+                    ),
+                )
             page = await context.new_page()
             page.set_default_timeout(self.config.browser_timeout_ms)
             page.set_default_navigation_timeout(self.config.navigation_timeout_ms)
@@ -1900,6 +1923,15 @@ class PlayerokClient:
                 ) from exc
             except Exception as exc:  # noqa: BLE001
                 last_error = exc
+                if self._is_page_crash(exc):
+                    # The renderer ran out of memory. A fresh browser is the
+                    # only way forward.
+                    logger.warning("Page crashed, restarting the browser")
+                    await self.restart_browser()
+                    raise PlayerokError(
+                        "Страница Playerok упала (нехватка памяти). "
+                        "Бот перезапустит браузер и повторит действие."
+                    ) from exc
                 if not self._is_network_error(exc):
                     raise
                 logger.warning("Navigation failed (%s), retrying", exc)
@@ -1983,6 +2015,21 @@ class PlayerokClient:
                     pass
         logger.warning("Playerok browser challenge did not pass")
         return None
+
+    @staticmethod
+    def _is_page_crash(exc: Exception) -> bool:
+        text = str(exc).lower()
+        return "page crashed" in text or "target closed" in text
+
+    async def restart_browser(self) -> None:
+        """Close the browser so the next cycle starts with a fresh one."""
+        async with self._browser_lock:
+            if self._browser is not None:
+                try:
+                    await asyncio.wait_for(self._browser.close(), timeout=20)
+                except Exception:  # noqa: BLE001
+                    pass
+                self._browser = None
 
     @staticmethod
     def _is_network_error(exc: Exception) -> bool:

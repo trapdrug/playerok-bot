@@ -7,7 +7,7 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject
 from aiogram.types import CallbackQuery, Message
 
-from app.bot.helpers import require_admin, require_admin_cb, safe_delete
+from app.bot.helpers import require_admin, require_admin_cb, safe_answer, safe_delete
 from app.bot.keyboards import accounts_menu, delete_confirm
 from app.bot.texts import build_accounts_text
 from app.context import AppContext
@@ -213,7 +213,7 @@ async def cb_accounts(
 ) -> None:
     if not await require_admin_cb(callback, user):
         return
-    await callback.answer()
+    await safe_answer(callback)
     await show_accounts(callback, ctx, user)
 
 
@@ -223,7 +223,7 @@ async def cb_create_worker_help(
 ) -> None:
     if not await require_admin_cb(callback, user):
         return
-    await callback.answer(
+    await safe_answer(callback, 
         "Создайте работника командой /create_worker логин пароль\n"
         "У него доступны только личные уведомления (вкл/выкл).",
         show_alert=True,
@@ -238,14 +238,14 @@ async def cb_disable_account(
         return
     target_id = _parse_id((callback.data or "").split(":")[-1])
     if target_id is None:
-        await callback.answer("Некорректный аккаунт", show_alert=True)
+        await safe_answer(callback, "Некорректный аккаунт", show_alert=True)
         return
     try:
         await ctx.auth.set_active(user, target_id, False)
     except AuthError as exc:
-        await callback.answer(exc.message, show_alert=True)
+        await safe_answer(callback, exc.message, show_alert=True)
         return
-    await callback.answer("Аккаунт отключён")
+    await safe_answer(callback, "Аккаунт отключён")
     await show_accounts(callback, ctx, user)
 
 
@@ -257,14 +257,14 @@ async def cb_enable_account(
         return
     target_id = _parse_id((callback.data or "").split(":")[-1])
     if target_id is None:
-        await callback.answer("Некорректный аккаунт", show_alert=True)
+        await safe_answer(callback, "Некорректный аккаунт", show_alert=True)
         return
     try:
         await ctx.auth.set_active(user, target_id, True)
     except AuthError as exc:
-        await callback.answer(exc.message, show_alert=True)
+        await safe_answer(callback, exc.message, show_alert=True)
         return
-    await callback.answer("Аккаунт включён")
+    await safe_answer(callback, "Аккаунт включён")
     await show_accounts(callback, ctx, user)
 
 
@@ -276,19 +276,19 @@ async def cb_delete_account(
         return
     target_id = _parse_id((callback.data or "").split(":")[-1])
     if target_id is None:
-        await callback.answer("Некорректный аккаунт", show_alert=True)
+        await safe_answer(callback, "Некорректный аккаунт", show_alert=True)
         return
     target = await ctx.auth.get_by_id(target_id)
     if target is None:
-        await callback.answer("Аккаунт не найден", show_alert=True)
+        await safe_answer(callback, "Аккаунт не найден", show_alert=True)
         return
     if target.is_main_admin:
-        await callback.answer(
+        await safe_answer(callback, 
             "Главного администратора нельзя удалить", show_alert=True
         )
         return
 
-    await callback.answer()
+    await safe_answer(callback)
     text = f"Удалить аккаунт <b>{html.escape(target.username)}</b>?"
     markup = delete_confirm(target.id, target.username)
     if callback.message is not None:
@@ -306,14 +306,14 @@ async def cb_confirm_delete_account(
         return
     target_id = _parse_id((callback.data or "").split(":")[-1])
     if target_id is None:
-        await callback.answer("Некорректный аккаунт", show_alert=True)
+        await safe_answer(callback, "Некорректный аккаунт", show_alert=True)
         return
     try:
         await ctx.auth.delete_account(user, target_id)
     except AuthError as exc:
-        await callback.answer(exc.message, show_alert=True)
+        await safe_answer(callback, exc.message, show_alert=True)
         return
-    await callback.answer("Аккаунт удалён")
+    await safe_answer(callback, "Аккаунт удалён")
     await show_accounts(callback, ctx, user)
 
 
