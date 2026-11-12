@@ -6,7 +6,7 @@ from decimal import Decimal
 import pytest
 from sqlalchemy import select
 
-from app.models import Sale
+from app.models import PendingBoost, Sale
 from app.playerok.client import (
     BoostOutcome,
     ChatInfo,
@@ -37,6 +37,7 @@ class FakeClient:
         self.publish_calls: list[str] = []
         self.publish_options: list[tuple] = []
         self.item_title: str | None = None
+        self.item_status: str = "APPROVED"
         self.fetched_items: list[str] = []
         self.boost_calls: list[tuple[str, bool, Decimal]] = []
         self.boost_limits: list[tuple[Decimal | None, Decimal | None]] = []
@@ -124,6 +125,38 @@ class FakeClient:
 
     async def fetch_balance(self, page):
         return Decimal("100.00")
+
+    async def _wait_for_item(self, page, slug, timeout_ms=30000):
+        return ItemInfo(
+            id="new-item",
+            slug=slug,
+            name=f"Item {slug}",
+            price=Decimal("100.00"),
+            description="Описание",
+            attributes={"type": "test"},
+            game_category_id="cat-1",
+            obtaining_type_id="type-1",
+            data_fields=[],
+            attachment_urls=[],
+            status=self.item_status,
+            priority="DEFAULT",
+            raw_price=Decimal("100.00"),
+        )
+
+    async def boost_listing(
+        self, page, item, *, max_amount=None, item_full_price=None
+    ):
+        if item.status and item.status.upper() not in ("APPROVED", "COMPLETED"):
+            return BoostOutcome(
+                status="deferred",
+                amount=None,
+                source="main",
+                reason="Товар ещё обрабатывается Playerok",
+            )
+        self.boost_calls.append((item.slug, max_amount, item_full_price))
+        return BoostOutcome(
+            status="success", amount=Decimal("10.00"), source="main"
+        )
 
     async def apply_boost(
         self,
@@ -353,14 +386,52 @@ async def test_live_mode_creates_copy_and_boosts_it(db, config):
     await automation.run_cycle()
 
     assert client.listing_calls == ["2"]
-    # The premium is bought while the new listing is published.
-    assert client.boost_calls == []
+    # The listing is published first, the premium is bought afterwards.
     assert client.publish_calls == ["https://playerok.com/products/copy-2"]
     premium, limit, item_price = client.publish_options[0]
     assert premium is True
-    # The single-boost limit and the item price without discount are passed on.
     assert limit == Decimal("925")
     assert item_price == Decimal("100.00")
+    # The premium is bought for the new listing, with the limit applied.
+    assert len(client.boost_calls) == 1
+    assert client.boost_calls[0][0] == "copy-2"
+    assert client.boost_calls[0][1] == Decimal("925")
+    assert client.boost_calls[0][2] == Decimal("100.00")
+
+
+@pytest.mark.asyncio
+async def test_premium_is_postponed_until_the_item_is_processed(db, config):
+    client = FakeClient([make_sale("1")])
+    client.item_status = "PENDING_APPROVAL"
+    cookies = FakeCookies()
+    notifications = FakeNotifications()
+    _, settings, automation = build_automation(
+        db, config, client, cookies, notifications
+    )
+
+    await settings.set_feature("auto_boost_enabled", True)
+    await settings.set_feature("dry_run", False)
+    await settings.set_daily_limit(Decimal("500"))
+    await automation.initialize()
+
+    await automation.run_cycle()
+    client.sales = [make_sale("1"), make_sale("2")]
+    await automation.run_cycle()
+
+    # The listing is published, but Playerok has not processed it yet.
+    assert client.publish_calls == ["https://playerok.com/products/copy-2"]
+    assert client.boost_calls == []
+    async with db.session() as session:
+        row = await session.scalar(
+            select(Sale).where(Sale.external_id == "2")
+        )
+        pending = list(await session.scalars(select(PendingBoost)))
+    assert row is not None
+    assert row.status == "relisted"
+    assert row.boost_state == "deferred"
+    # The premium is queued and will be bought in one of the next cycles.
+    assert len(pending) == 1
+    assert pending[0].lot_url == "https://playerok.com/products/copy-2"
 
 
 @pytest.mark.asyncio

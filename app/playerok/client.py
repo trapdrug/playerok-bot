@@ -1504,28 +1504,76 @@ class PlayerokClient:
                     reason="Объявление осталось черновиком",
                 )
 
-        if not premium:
+        # The premium is bought in a separate step: Playerok processes a new
+        # listing first and only then allows to buy the priority.
+        return BoostOutcome(
+            status="success",
+            amount=None,
+            source="main",
+            reason=None,
+        )
+
+    async def boost_listing(
+        self,
+        page: Page,
+        item: ItemInfo,
+        *,
+        max_amount: Decimal | None = None,
+        item_full_price: Decimal | None = None,
+    ) -> BoostOutcome:
+        """Buy the premium for a published listing.
+
+        Playerok processes a fresh listing before the priority can be bought,
+        so the caller has to repeat the call until the listing is approved.
+        """
+        status = (item.status or "").upper()
+        if status and status not in ("APPROVED", "COMPLETED"):
             return BoostOutcome(
-                status="success",
+                status="deferred",
                 amount=None,
                 source="main",
-                reason=None,
+                reason=(
+                    f"Товар ещё обрабатывается Playerok (статус {status})"
+                ),
             )
 
-        # The premium is bought separately and its result is verified.
-        if premium_id is None:
+        options = await self._priority_options(page, item)
+        premium_id: str | None = None
+        premium_price: Decimal | None = None
+        for entry in options:
+            if str(entry.get("type") or "").upper() == "PREMIUM":
+                premium_id = str(entry.get("id") or "") or None
+                premium_price = parse_money(entry.get("price"))
+        if not premium_id:
             return BoostOutcome(
                 status="deferred",
                 amount=None,
                 source="main",
                 reason="Premium недоступен для этого товара",
             )
-        bought = await self.increase_priority(page, item.id, premium_id)
-        if bought.status != "success":
-            return bought
-        if bought.amount is None:
-            bought.amount = premium_price
-        return bought
+
+        effective = premium_price
+        if effective is None:
+            effective = item_full_price
+        if (
+            max_amount is not None
+            and effective is not None
+            and effective > max_amount
+        ):
+            return BoostOutcome(
+                status="skipped",
+                amount=effective,
+                source="main",
+                reason=(
+                    f"Стоимость буста {money(effective)} выше лимита за один "
+                    f"буст ({money(max_amount)})"
+                ),
+            )
+
+        outcome = await self.increase_priority(page, item.id, premium_id)
+        if outcome.status == "success" and outcome.amount is None:
+            outcome.amount = premium_price
+        return outcome
 
     async def increase_priority(
         self,

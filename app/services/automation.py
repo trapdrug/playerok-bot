@@ -565,7 +565,42 @@ class AutomationService:
             )
             return
 
-        if outcome.status == "success":
+        if outcome.status != "success":
+            await self._set_sale_fields(
+                sale.id, boost_state="publish_failed", error=outcome.reason
+            )
+            sale.boost_state = "publish_failed"
+            await self.notifications.generic_error(
+                "Не удалось выставить новое объявление: "
+                f"{outcome.reason or 'неизвестная ошибка'}"
+            )
+            return
+
+        # The listing is on sale. The premium is bought in a separate step:
+        # Playerok processes a new listing first and only then allows to buy
+        # the priority.
+        await self._set_sale_fields(
+            sale.id, status="relisted", boost_state="without_premium", error=None
+        )
+        sale.status = "relisted"
+        sale.boost_state = "without_premium"
+        await self.audit.log(
+            "published_without_premium",
+            f"Сделка {sale.external_id}: объявление выставлено"
+            + (f" ({reason})" if reason else ""),
+        )
+
+        if not premium:
+            return
+
+        balance_before = await self.client.fetch_balance(page)
+        bought = await self._buy_premium(
+            page, sale, lot_url, item_full_price=item_full_price
+        )
+        if bought is None:
+            return
+
+        if bought.status == "success":
             balance_after = await self.client.fetch_balance(page)
             if (
                 balance_before is not None
@@ -573,9 +608,8 @@ class AutomationService:
                 and balance_before > balance_after
             ):
                 # The real price of the premium is the balance difference.
-                outcome.amount = balance_before - balance_after
-            if outcome.amount:
-                # The premium was bought with the main balance.
+                bought.amount = balance_before - balance_after
+            if bought.amount:
                 await self._set_sale_fields(
                     sale.id,
                     status="boosted",
@@ -585,42 +619,81 @@ class AutomationService:
                 )
                 sale.status = "boosted"
                 sale.boost_state = "boosted"
-                await self.settings.record_boost_spend(outcome.amount)
+                await self.settings.record_boost_spend(bought.amount)
                 await self.notifications.boost_paid(
-                    sale, outcome.amount, dry_run=False
+                    sale, bought.amount, dry_run=False
                 )
                 await self.audit.log(
                     "boost_paid",
-                    f"Сделка {sale.external_id}: {outcome.amount}"
-                    + (f" ({reason})" if reason else ""),
+                    f"Сделка {sale.external_id}: {bought.amount}",
                 )
                 return
-
-            # Published without the premium.
+            # Playerok accepted the request but the premium was not applied.
             await self._set_sale_fields(
-                sale.id, status="relisted", boost_state="without_premium", error=None
+                sale.id, boost_state="without_premium", error=None
             )
-            sale.status = "relisted"
             sale.boost_state = "without_premium"
-            await self.audit.log(
-                "published_without_premium",
-                f"Сделка {sale.external_id}: объявление выставлено без буста"
-                + (f" ({reason})" if reason else ""),
+            await self.notifications.boost_deferred(
+                sale, bought.reason or "Премиум не применён"
             )
             return
 
-        # The listing was published, but without the premium.
-        await self._set_sale_fields(
-            sale.id, status="relisted", boost_state="without_premium", error=None
-        )
-        sale.status = "relisted"
-        sale.boost_state = "without_premium"
-        await self.audit.log(
-            "published_without_premium",
-            f"Сделка {sale.external_id}: объявление выставлено без буста"
-            + (f" ({reason})" if reason else "")
-            + (f" — {outcome.reason}" if outcome.reason else ""),
-        )
+        if bought.status == "skipped":
+            await self._set_sale_fields(
+                sale.id,
+                boost_state="skipped",
+                error=truncate(bought.reason or "", 500),
+            )
+            sale.boost_state = "skipped"
+            await self.notifications.boost_skipped(
+                sale, bought.reason or "Превышен лимит стоимости буста"
+            )
+            await self.audit.log(
+                "boost_skipped",
+                f"Сделка {sale.external_id}: {bought.reason}",
+            )
+            return
+
+        # The listing is still processed by Playerok: try again later.
+        await self._defer_boost(sale, bought.amount, bought.reason or "Ожидание")
+
+    async def _buy_premium(
+        self,
+        page: Page,
+        sale: Sale,
+        lot_url: str,
+        *,
+        item_full_price: Decimal | None = None,
+    ) -> BoostOutcome | None:
+        """Buy the premium for a published listing through the API."""
+        settings = await self.settings.get()
+        max_amount = Decimal(settings.max_boost_amount or 0)
+        slug = lot_url.rstrip("/").split("/")[-1]
+        item = await self.client._wait_for_item(page, slug, timeout_ms=30000)
+        if item is None:
+            return BoostOutcome(
+                status="deferred",
+                amount=None,
+                source="main",
+                reason="Объявление недоступно на Playerok",
+            )
+        try:
+            return await self.client.boost_listing(
+                page,
+                item,
+                max_amount=max_amount,
+                item_full_price=item_full_price,
+            )
+        except (SessionExpiredError, CaptchaError, RateLimitError):
+            raise
+        except PlayerokError as exc:
+            logger.warning("Cannot buy the premium: %s", exc)
+            return BoostOutcome(
+                status="deferred",
+                amount=None,
+                source="main",
+                reason=truncate(str(exc), 300),
+            )
 
     async def _publish_without_premium(
         self,
