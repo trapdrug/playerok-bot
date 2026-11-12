@@ -288,38 +288,42 @@ class PlayerokClient:
             return await self.check_session(page)
 
     async def check_session(self, page: Page) -> SessionInfo:
-        auth_path = self.selectors.url("auth_check")
-        response = await self._goto(page, self._absolute(auth_path))
-
-        body = await self._body_text(page)
-        challenge = self._is_challenge(body)
-        if challenge:
-            # The anti-bot page answers 403 as well; that is not an expired
-            # session. The page verifies itself and the bot waits for it.
-            logger.info("Playerok is still verifying the browser, waiting")
-            await page.wait_for_timeout(
-                max(5, self.config.challenge_wait_seconds) * 1000
-            )
-            response = await self._goto(page, self._absolute(auth_path))
-            body = await self._body_text(page)
-            challenge = self._is_challenge(body)
-            if challenge:
-                raise CaptchaError(
-                    "Playerok проверяет браузер и не пропускает автоматизацию"
-                )
-
-        login_form = await self._find_visible(
-            page, "session.login_form", timeout_ms=1200
-        )
-        if not challenge and (
-            (response is not None and response.status in (401, 403))
-            or "/profile/auth" in page.url
-            or login_form is not None
-            or "вход или регистрация" in body.lower()
-        ):
-            raise SessionExpiredError("Сессия Playerok истекла")
-
+        # The API answers faster and does not load the heavy Playerok SPA.
         viewer = await self._try_viewer(page)
+        if viewer is None:
+            auth_path = self.selectors.url("auth_check")
+            response = await self._goto(page, self._absolute(auth_path))
+
+            body = await self._body_text(page)
+            if self._is_challenge(body):
+                # The anti-bot page answers 403 as well; that is not an expired
+                # session. The page verifies itself and the bot waits for it.
+                logger.info("Playerok is still verifying the browser, waiting")
+                await page.wait_for_timeout(
+                    max(5, self.config.challenge_wait_seconds) * 1000
+                )
+                response = await self._goto(page, self._absolute(auth_path))
+                body = await self._body_text(page)
+                if self._is_challenge(body):
+                    raise CaptchaError(
+                        "Playerok проверяет браузер и не пропускает автоматизацию"
+                    )
+
+            login_form = await self._find_visible(
+                page, "session.login_form", timeout_ms=1200
+            )
+            if (
+                (response is not None and response.status in (401, 403))
+                or "/profile/auth" in page.url
+                or login_form is not None
+                or "вход или регистрация" in body.lower()
+            ):
+                raise SessionExpiredError("Сессия Playerok истекла")
+
+            # The browser check may have been the reason: ask the API again.
+            viewer = await self._try_viewer(page)
+            if viewer is None:
+                raise SessionExpiredError("Сессия Playerok истекла")
         username = (
             self.config.playerok_username
             or (str(viewer.get("username")) if viewer and viewer.get("username") else None)
@@ -1159,10 +1163,17 @@ class PlayerokClient:
         last_error: Exception | None = None
         for attempt in range(2):
             try:
-                return await asyncio.wait_for(
-                    page.evaluate(script, argument),
-                    timeout=self.config.browser_timeout_ms / 1000 + 30,
-                )
+                # Playwright cannot cancel a stuck evaluate, so the call is
+                # shielded and simply abandoned on timeout.
+                task = asyncio.ensure_future(page.evaluate(script, argument))
+                try:
+                    return await asyncio.wait_for(
+                        asyncio.shield(task),
+                        timeout=self.config.browser_timeout_ms / 1000 + 30,
+                    )
+                except asyncio.TimeoutError as exc:
+                    task.cancel()
+                    raise exc
             except Exception as exc:  # noqa: BLE001
                 last_error = exc
                 message = str(exc)
@@ -2000,17 +2011,11 @@ class PlayerokClient:
         deadline = asyncio.get_running_loop().time() + timeout_ms / 1000
         while asyncio.get_running_loop().time() < deadline:
             try:
-                length = await asyncio.wait_for(
-                    page.evaluate(
-                        "() => (document.body && document.body.innerText || '')"
-                        ".length"
-                    ),
-                    timeout=20,
-                )
+                text = await self._body_text(page)
             except Exception:  # noqa: BLE001
                 await page.wait_for_timeout(300)
                 continue
-            if isinstance(length, int) and length > 300:
+            if len(text) > 300:
                 return
             await page.wait_for_timeout(300)
 
