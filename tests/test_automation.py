@@ -35,6 +35,7 @@ class FakeClient:
         self.chats: list[ChatInfo] = []
         self.listing_calls: list[str] = []
         self.publish_calls: list[str] = []
+        self.publish_options: list[tuple] = []
         self.item_title: str | None = None
         self.fetched_items: list[str] = []
         self.boost_calls: list[tuple[str, bool, Decimal]] = []
@@ -99,9 +100,27 @@ class FakeClient:
             dry_run=False,
         )
 
-    async def publish_listing(self, page, lot_url):
+    async def publish_listing(
+        self,
+        page,
+        lot_url,
+        *,
+        premium=False,
+        max_amount=None,
+        item_full_price=None,
+    ):
         self.publish_calls.append(lot_url)
-        return True
+        self.publish_options.append((premium, max_amount, item_full_price))
+        if premium:
+            return BoostOutcome(
+                status="success",
+                amount=Decimal("10.00"),
+                source="main",
+            )
+        return BoostOutcome(status="success", amount=None, source="main")
+
+    async def restart_browser(self):
+        return None
 
     async def apply_boost(
         self,
@@ -331,12 +350,12 @@ async def test_live_mode_creates_copy_and_boosts_it(db, config):
     await automation.run_cycle()
 
     assert client.listing_calls == ["2"]
-    assert len(client.boost_calls) == 1
-    # The premium is paid for the newly created listing, not for the sold one.
-    assert client.boost_calls[0][0] == "https://playerok.com/products/copy-2"
-    assert client.boost_calls[0][1] is False
+    # The premium is bought while the new listing is published.
+    assert client.boost_calls == []
+    assert client.publish_calls == ["https://playerok.com/products/copy-2"]
+    premium, limit, item_price = client.publish_options[0]
+    assert premium is True
     # The single-boost limit and the item price without discount are passed on.
-    limit, item_price = client.boost_limits[0]
     assert limit == Decimal("925")
     assert item_price == Decimal("100.00")
 

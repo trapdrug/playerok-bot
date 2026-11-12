@@ -1339,16 +1339,21 @@ class PlayerokClient:
             raise PlayerokError("GraphQL: пустой ответ")
         return data
 
-    async def publish_listing(self, page: Page, lot_url: str) -> bool:
-        """Publish a fresh listing without premium (the free option).
+    async def publish_listing(
+        self,
+        page: Page,
+        lot_url: str,
+        *,
+        premium: bool = False,
+        max_amount: Decimal | None = None,
+        item_full_price: Decimal | None = None,
+    ) -> BoostOutcome:
+        """Publish a fresh listing, optionally buying the premium.
 
-        Used when auto-boost is off or when the single-boost limit is
-        exceeded: the listing still goes on sale, only without premium.
+        Everything happens through the API: the heavy Playerok listing page is
+        never opened, so the bot works even with 1 GB of RAM.
         """
         await self._before_action()
-        # The publication goes through the API, so the heavy listing page is
-        # not opened at all (it used to crash the browser on a small service).
-
         slug = lot_url.rstrip("/").split("/")[-1]
         item = await self._wait_for_item(page, slug)
         if item is None:
@@ -1356,17 +1361,60 @@ class PlayerokClient:
                 f"Новое объявление {slug} пока недоступно на Playerok"
             )
         if item.status and item.status.upper() != "DRAFT":
-            return True
+            return BoostOutcome(
+                status="success",
+                amount=None,
+                source="main",
+                reason="Объявление уже опубликовано",
+            )
 
-        # The free ("Обычный") priority is read through the API, so the heavy
-        # item page does not have to be opened at all.
-        priority_id = await self._free_priority_id(page, item)
-        if not priority_id or not item.id:
+        options = await self._priority_options(page, item)
+        priority_id: str | None = None
+        premium_price: Decimal | None = None
+        for entry in options:
+            kind = str(entry.get("type") or "").upper()
+            if kind == "PREMIUM":
+                premium_price = parse_money(entry.get("price"))
+                premium_id = str(entry.get("id") or "") or None
+            elif kind == "DEFAULT" and not priority_id:
+                priority_id = str(entry.get("id") or "") or None
+        if not premium_id and options:
+            premium_id = str(options[0].get("id") or "") or None
+
+        if premium and premium_price is not None and max_amount is not None:
+            if premium_price > max_amount:
+                logger.info(
+                    "Premium %s is above the limit %s, publishing without it",
+                    premium_price,
+                    max_amount,
+                )
+                premium = False
+                premium_price = None
+        if premium and premium_price is None and item_full_price is not None:
+            # The premium price is unknown: fall back to the item price
+            # without the seller's discount.
+            if max_amount is not None and item_full_price > max_amount:
+                logger.info(
+                    "Premium price is unknown, using the item price %s "
+                    "which is above the limit %s",
+                    item_full_price,
+                    max_amount,
+                )
+                premium = False
+
+        if not priority_id:
             # Fallback: publish through the modal button.
-            return await self._publish_listing_via_ui(page, lot_url)
+            published = await self._publish_listing_via_ui(page, lot_url)
+            return BoostOutcome(
+                status="success" if published else "deferred",
+                amount=None,
+                source="main",
+                reason=None if published else "Не удалось опубликовать объявление",
+            )
 
         data: dict[str, Any] | None = None
-        for attempt in range(3):
+        last_error: str | None = None
+        for _ in range(3):
             try:
                 data = await self._graphql(
                     page,
@@ -1383,21 +1431,78 @@ class PlayerokClient:
                 )
                 break
             except PlayerokError as exc:
+                last_error = truncate(str(exc), 300)
                 logger.warning("publishItem failed (%s), retrying", exc)
                 await page.wait_for_timeout(10000)
         if data is None:
-            # Fallback: publish through the modal button.
-            return await self._publish_listing_via_ui(page, lot_url)
+            return BoostOutcome(
+                status="deferred",
+                amount=premium_price,
+                source="main",
+                reason=last_error or "Playerok не принял публикацию",
+            )
+
         published = data.get("publishItem")
+        status = ""
+        priority = ""
         if isinstance(published, dict):
             status = str(published.get("status") or "").upper()
-            if status and status != "DRAFT":
-                return True
+            priority = str(published.get("priority") or "").upper()
+        if status and status != "DRAFT":
+            return BoostOutcome(
+                status="success",
+                amount=premium_price if premium else None,
+                source="main",
+                reason=None,
+            )
 
         after = await self._wait_for_item(page, slug, timeout_ms=30000)
-        if after is None:
-            return False
-        return bool(after.status and after.status.upper() != "DRAFT")
+        if after is not None and after.status and after.status.upper() != "DRAFT":
+            return BoostOutcome(
+                status="success",
+                amount=premium_price if premium else None,
+                source="main",
+                reason=None,
+            )
+        return BoostOutcome(
+            status="deferred",
+            amount=premium_price,
+            source="main",
+            reason="Объявление осталось черновиком",
+        )
+
+    async def _priority_options(
+        self, page: Page, item: ItemInfo
+    ) -> list[dict[str, Any]]:
+        """Read the priority options of a listing through the API."""
+        operation = str(
+            self.selectors.get("graphql.item_priority_operation", "itemPriorityStatuses")
+        )
+        sha256_hash = str(
+            self.selectors.get("graphql.item_priority_sha256", "") or ""
+        )
+        if not sha256_hash or not item.id:
+            return []
+        for attempt in range(5):
+            try:
+                data = await self._graphql_persisted(
+                    page,
+                    operation,
+                    {"itemId": item.id, "price": int(item.price or 0)},
+                    sha256_hash,
+                )
+            except PlayerokError as exc:
+                logger.warning("Cannot read the priority options: %s", exc)
+                data = {}
+            statuses = data.get("itemPriorityStatuses")
+            if isinstance(statuses, list) and statuses:
+                return [entry for entry in statuses if isinstance(entry, dict)]
+            # A fresh listing is not indexed right away - wait and try again.
+            logger.info(
+                "Priority options are not ready yet (attempt %s)", attempt + 1
+            )
+            await page.wait_for_timeout(10000)
+        return []
 
     async def _publish_listing_via_ui(self, page: Page, lot_url: str) -> bool:
         """Publish through the modal button ("Выставить бесплатно")."""

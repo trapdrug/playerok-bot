@@ -491,22 +491,111 @@ class AutomationService:
             await self.notifications.boost_skipped(
                 row, f"Сработал триггер «{skip_reason}»"
             )
-            if lot_url and not result.dry_run:
-                await self._publish_without_premium(
-                    page, row, lot_url, reason=skip_reason
+
+        if not lot_url or result.dry_run:
+            if settings.auto_boost_enabled and result.dry_run:
+                await self.notifications.boost_deferred(
+                    row, "DRY-RUN: буст не выполнялся без нового объявления"
                 )
             return
 
-        if settings.auto_boost_enabled and lot_url:
-            await self._boost_sale(page, row, lot_url, info)
-        elif settings.auto_boost_enabled and result.dry_run:
-            await self.notifications.boost_deferred(
-                row, "DRY-RUN: буст не выполнялся без нового объявления"
+        # The new listing is published right away, with premium when it is
+        # allowed. Everything goes through the API, so no browser page is
+        # opened and the bot fits into 1 GB of RAM.
+        await self._publish_new_listing(
+            page,
+            row,
+            lot_url,
+            premium=bool(settings.auto_boost_enabled) and not skip_reason,
+            reason=skip_reason,
+            item_full_price=raw_price,
+        )
+
+    async def _publish_new_listing(
+        self,
+        page: Page,
+        sale: Sale,
+        lot_url: str,
+        *,
+        premium: bool,
+        reason: str | None = None,
+        item_full_price: Decimal | None = None,
+    ) -> None:
+        """Publish a fresh listing through the API, with premium if allowed."""
+        settings = await self.settings.get()
+        max_amount = Decimal(settings.max_boost_amount or 0)
+        try:
+            outcome = await self.client.publish_listing(
+                page,
+                lot_url,
+                premium=premium,
+                max_amount=max_amount,
+                item_full_price=item_full_price,
             )
-        elif lot_url and not result.dry_run:
-            # Auto-boost is off: the new listing still goes on sale, but
-            # without premium.
-            await self._publish_without_premium(page, row, lot_url)
+        except (SessionExpiredError, CaptchaError, RateLimitError):
+            raise
+        except PlayerokError as exc:
+            message = truncate(str(exc), 900)
+            await self._set_sale_fields(
+                sale.id, boost_state="publish_failed", error=message
+            )
+            sale.boost_state = "publish_failed"
+            await self.audit.log(
+                "publish_failed", f"Сделка {sale.external_id}: {message}"
+            )
+            await self.notifications.generic_error(
+                f"Не удалось выставить новое объявление: {message}"
+            )
+            return
+
+        if outcome.status == "success":
+            if outcome.amount:
+                # The premium was bought with the main balance.
+                await self._set_sale_fields(
+                    sale.id,
+                    status="boosted",
+                    boost_state="boosted",
+                    boosted_at=utcnow(),
+                    error=None,
+                )
+                sale.status = "boosted"
+                sale.boost_state = "boosted"
+                await self.settings.record_boost_spend(outcome.amount)
+                await self.notifications.boost_paid(
+                    sale, outcome.amount, dry_run=False
+                )
+                await self.audit.log(
+                    "boost_paid",
+                    f"Сделка {sale.external_id}: {outcome.amount}"
+                    + (f" ({reason})" if reason else ""),
+                )
+                return
+
+            # Published without the premium.
+            await self._set_sale_fields(
+                sale.id, status="relisted", boost_state="without_premium", error=None
+            )
+            sale.status = "relisted"
+            sale.boost_state = "without_premium"
+            await self.audit.log(
+                "published_without_premium",
+                f"Сделка {sale.external_id}: объявление выставлено без буста"
+                + (f" ({reason})" if reason else ""),
+            )
+            return
+
+        # The listing was published, but without the premium.
+        await self._set_sale_fields(
+            sale.id, status="relisted", boost_state="without_premium", error=None
+        )
+        sale.status = "relisted"
+        sale.boost_state = "without_premium"
+        await self.audit.log(
+            "published_without_premium",
+            f"Сделка {sale.external_id}: объявление выставлено без буста"
+            + (f" ({reason})" if reason else "")
+            + (f" — {outcome.reason}" if outcome.reason else ""),
+        )
 
     async def _publish_without_premium(
         self,
