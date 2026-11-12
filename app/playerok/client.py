@@ -296,6 +296,10 @@ class PlayerokClient:
             response = await self._goto(page, self._absolute(auth_path))
             body = await self._body_text(page)
             challenge = self._is_challenge(body)
+            if challenge:
+                raise CaptchaError(
+                    "Playerok проверяет браузер и не пропускает автоматизацию"
+                )
 
         login_form = await self._find_visible(
             page, "session.login_form", timeout_ms=1200
@@ -1900,8 +1904,8 @@ class PlayerokClient:
         """Wait out the Playerok "browser verification" page.
 
         Playerok shows this page for an IP it has not seen before. The page
-        verifies the browser and reloads itself, so the bot simply waits and
-        reloads until the real content appears.
+        verifies the browser by itself and reloads automatically, so the bot
+        only waits and watches the page - reloading would interrupt the check.
         """
         markers = [
             marker.lower()
@@ -1909,30 +1913,39 @@ class PlayerokClient:
         ]
         if not markers:
             return None
-        response: Response | None = None
+        wait_seconds = max(5, self.config.challenge_wait_seconds)
         for attempt in range(self.config.challenge_max_attempts):
             try:
                 body = (await self._body_text(page)).lower()
             except Exception:  # noqa: BLE001
                 body = ""
             if not any(marker in body for marker in markers):
-                return response
+                logger.info("Playerok browser check passed")
+                return None
             logger.info(
-                "Playerok browser challenge detected (attempt %s), waiting",
+                "Playerok browser challenge detected (attempt %s), waiting %ss",
                 attempt + 1,
+                wait_seconds,
             )
-            await page.wait_for_timeout(
-                max(5, self.config.challenge_wait_seconds) * 1000
-            )
+            await page.wait_for_timeout(wait_seconds * 1000)
             try:
-                response = await page.reload(
-                    wait_until="domcontentloaded",
-                    timeout=self.config.navigation_timeout_ms,
-                )
+                body = (await self._body_text(page)).lower()
             except Exception:  # noqa: BLE001
-                return response
+                body = ""
+            if not any(marker in body for marker in markers):
+                logger.info("Playerok browser check passed")
+                return None
+            if attempt + 1 == self.config.challenge_max_attempts:
+                # Last resort: a manual reload may pick up the verified state.
+                try:
+                    await page.reload(
+                        wait_until="domcontentloaded",
+                        timeout=self.config.navigation_timeout_ms,
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
         logger.warning("Playerok browser challenge did not pass")
-        return response
+        return None
 
     @staticmethod
     def _is_network_error(exc: Exception) -> bool:
