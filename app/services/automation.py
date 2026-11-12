@@ -48,8 +48,10 @@ CRITICAL_ERRORS = (
     StopRequestedError,
 )
 
-PENDING_BOOST_MAX_ATTEMPTS = 3
-PENDING_BOOST_RETRY_SECONDS = 600
+PENDING_BOOST_MAX_ATTEMPTS = 180
+# How often the state of a pending listing is checked. Playerok processes a
+# new listing within a few minutes, so the check runs every minute.
+PENDING_BOOST_RETRY_SECONDS = 60
 RELIST_MAX_ATTEMPTS = 3
 UNFINISHED_SALE_MAX_AGE_HOURS = 24
 
@@ -756,144 +758,6 @@ class AutomationService:
             + (f" ({reason})" if reason else ""),
         )
 
-    async def _boost_sale(
-        self, page: Page, sale: Sale, lot_url: str | None, info: SaleInfo
-    ) -> None:
-        settings = await self.settings.get()
-        if not settings.auto_boost_enabled:
-            return
-        if not lot_url:
-            await self._defer_boost(
-                sale, None, "Не найден URL лота для буста"
-            )
-            return
-
-        sale.lot_url = lot_url
-        await self._set_sale_fields(sale.id, boost_state="boosting", error=None)
-        sale.boost_state = "boosting"
-
-        remaining = await self.settings.remaining_boost_budget()
-        if not settings.dry_run and remaining <= 0:
-            await self._set_sale_fields(sale.id, boost_state="limit")
-            sale.boost_state = "limit"
-            await self._disable_boost_for_limit(None)
-            return
-
-        try:
-            outcome = await self.client.apply_boost(
-                page,
-                lot_url,
-                dry_run=settings.dry_run,
-                remaining_budget=remaining,
-                max_amount=Decimal(settings.max_boost_amount or 0),
-                item_full_price=sale.item_raw_price,
-            )
-        except (SessionExpiredError, CaptchaError, RateLimitError) as exc:
-            await self._set_sale_fields(
-                sale.id, boost_state="failed", error=truncate(str(exc), 900)
-            )
-            raise
-        except LayoutChangedError as exc:
-            await self._set_sale_fields(
-                sale.id, boost_state="uncertain", error=truncate(str(exc), 900)
-            )
-            raise
-        except StopRequestedError:
-            # Payment may have been submitted; never auto-retry it.
-            raise
-        except PaymentUncertainError as exc:
-            await self._set_sale_fields(
-                sale.id, boost_state="uncertain", error=truncate(str(exc), 900)
-            )
-            raise
-        except PlayerokError as exc:
-            message = truncate(str(exc), 900)
-            await self._set_sale_fields(
-                sale.id, boost_state="failed", error=message
-            )
-            await self.audit.log(
-                "boost_failed", f"Сделка {info.external_id}: {message}"
-            )
-            await self.notifications.generic_error(
-                f"Не удалось применить буст к {info.external_id}: {message}"
-            )
-            return
-
-        await self._apply_boost_outcome(page, sale, outcome)
-
-    async def _apply_boost_outcome(
-        self, page: Page, sale: Sale, outcome: BoostOutcome
-    ) -> None:
-        if outcome.status == "success":
-            await self.settings.record_boost_spend(
-                outcome.amount or Decimal("0")
-            )
-            await self._set_sale_fields(
-                sale.id,
-                status="boosted",
-                boost_state="boosted",
-                boosted_at=utcnow(),
-                error=None,
-            )
-            sale.status = "boosted"
-            sale.boost_state = "boosted"
-            await self.notifications.boost_paid(
-                sale, outcome.amount, dry_run=False
-            )
-            await self.audit.log(
-                "boost_paid", f"Сделка {sale.external_id}: {outcome.amount}"
-            )
-            return
-
-        if outcome.status == "dry_run":
-            await self._set_sale_fields(
-                sale.id, boost_state="dry_run", error=None
-            )
-            sale.boost_state = "dry_run"
-            await self.notifications.boost_paid(
-                sale, outcome.amount, dry_run=True
-            )
-            await self.audit.log(
-                "boost_dry_run", f"Сделка {sale.external_id}: {outcome.amount}"
-            )
-            return
-
-        if outcome.status == "deferred":
-            await self._defer_boost(
-                sale,
-                outcome.amount,
-                outcome.reason or "Источник оплаты не основной баланс",
-            )
-            return
-
-        if outcome.status == "limit":
-            await self._set_sale_fields(sale.id, boost_state="limit")
-            sale.boost_state = "limit"
-            await self._disable_boost_for_limit(outcome.amount)
-            if sale.lot_url:
-                await self._publish_without_premium(page, sale, sale.lot_url)
-
-        if outcome.status == "skipped":
-            # The single-boost limit was reached. Auto-boost stays enabled:
-            # only this listing is skipped, but it still goes on sale.
-            await self._set_sale_fields(
-                sale.id,
-                boost_state="skipped",
-                error=truncate(outcome.reason or "", 900),
-            )
-            sale.boost_state = "skipped"
-            await self.notifications.boost_deferred(
-                sale,
-                outcome.reason or "Стоимость буста выше лимита за один буст",
-                outcome.amount,
-            )
-            await self.audit.log(
-                "boost_skipped",
-                f"Сделка {sale.external_id}: {outcome.reason}",
-            )
-            if sale.lot_url:
-                await self._publish_without_premium(page, sale, sale.lot_url)
-
     async def _defer_boost(
         self, sale: Sale, amount: Decimal | None, reason: str
     ) -> None:
@@ -1002,14 +866,18 @@ class AutomationService:
                 return
 
             try:
-                outcome = await self.client.apply_boost(
-                    page,
-                    item.lot_url,
-                    dry_run=False,
-                    remaining_budget=remaining,
-                    max_amount=Decimal(settings.max_boost_amount or 0),
-                    item_full_price=item.item_price,
-                )
+                balance_before = await self.client.fetch_balance(page)
+                outcome = await self._boost_pending(page, item)
+                if outcome.status == "success":
+                    balance_after = await self.client.fetch_balance(page)
+                    if (
+                        balance_before is not None
+                        and balance_after is not None
+                        and balance_before > balance_after
+                    ):
+                        # The real price of the premium is the balance
+                        # difference.
+                        outcome.amount = balance_before - balance_after
             except (SessionExpiredError, CaptchaError, RateLimitError) as exc:
                 await self._mark_pending(
                     item.id, "failed", truncate(str(exc), 500)
@@ -1039,6 +907,38 @@ class AutomationService:
                 continue
 
             await self._apply_pending_outcome(item, outcome)
+
+    async def _boost_pending(
+        self, page: Page, pending: PendingBoost
+    ) -> BoostOutcome:
+        """Buy the premium for a queued listing through the API."""
+        settings = await self.settings.get()
+        slug = pending.lot_url.rstrip("/").split("/")[-1]
+        item = await self.client._wait_for_item(page, slug, timeout_ms=30000)
+        if item is None:
+            return BoostOutcome(
+                status="deferred",
+                amount=None,
+                source="main",
+                reason="Объявление недоступно на Playerok",
+            )
+        try:
+            return await self.client.boost_listing(
+                page,
+                item,
+                max_amount=Decimal(settings.max_boost_amount or 0),
+                item_full_price=pending.item_price,
+            )
+        except (SessionExpiredError, CaptchaError, RateLimitError):
+            raise
+        except PlayerokError as exc:
+            logger.warning("Cannot buy the premium: %s", exc)
+            return BoostOutcome(
+                status="deferred",
+                amount=None,
+                source="main",
+                reason=truncate(str(exc), 300),
+            )
 
     async def _apply_pending_outcome(
         self, item: PendingBoost, outcome: BoostOutcome
@@ -1080,9 +980,30 @@ class AutomationService:
                     f"повторяется: {outcome.reason}"
                 )
             else:
+                # The listing is still processed by Playerok. The user was
+                # told about it once, no need to repeat it every minute.
                 await self._mark_pending(
                     item.id, "pending", outcome.reason, attempts=attempts
                 )
+            return
+
+        if outcome.status == "skipped":
+            # The single-boost limit is exceeded: do not retry.
+            await self._mark_pending(item.id, "cancelled", outcome.reason)
+            await self._set_sale_by_external(
+                item.sale_external_id,
+                boost_state="skipped",
+                error=truncate(outcome.reason or "", 500),
+            )
+            sale = await self._get_sale_by_external(item.sale_external_id)
+            if sale is not None:
+                await self.notifications.boost_skipped(
+                    sale, outcome.reason or "Превышен лимит стоимости буста"
+                )
+            await self.audit.log(
+                "boost_skipped",
+                f"Сделка {item.sale_external_id}: {outcome.reason}",
+            )
             return
 
         if outcome.status == "limit":
