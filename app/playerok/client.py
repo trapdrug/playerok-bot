@@ -2028,8 +2028,12 @@ class PlayerokClient:
         deadline = asyncio.get_running_loop().time() + timeout_ms / 1000
         while asyncio.get_running_loop().time() < deadline:
             try:
-                length = await page.evaluate(
-                    "() => (document.body && document.body.innerText || '').length"
+                length = await asyncio.wait_for(
+                    page.evaluate(
+                        "() => (document.body && document.body.innerText || '')"
+                        ".length"
+                    ),
+                    timeout=20,
                 )
             except Exception:  # noqa: BLE001
                 await page.wait_for_timeout(300)
