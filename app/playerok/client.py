@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import random
@@ -514,9 +515,13 @@ class PlayerokClient:
             try:
                 response = await page.context.request.get(url)
                 if not response.ok:
+                    logger.warning(
+                        "Picture download failed (%s): HTTP %s", url, response.status
+                    )
                     continue
                 body = await response.body()
                 if not body:
+                    logger.warning("Picture is empty: %s", url)
                     continue
                 images.append(
                     (
@@ -526,6 +531,11 @@ class PlayerokClient:
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Cannot download item picture %s: %s", url, exc)
+
+        if not images:
+            raise LayoutChangedError(
+                "Не удалось получить картинки товара — копию создать нельзя"
+            )
 
         payload = {
             "input": {
