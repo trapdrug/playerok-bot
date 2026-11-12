@@ -208,6 +208,7 @@ class AutomationService:
 
                 await self._process_unfinished_sales(page)
                 await self._process_new_sales(page, sales)
+                await self._process_pending_publishes(page)
                 await self._process_pending_boosts(page)
         finally:
             # A fresh browser for every cycle releases the memory of the
@@ -746,6 +747,31 @@ class AutomationService:
         )
 
     # --------------------------------------------------------- pending boosts
+
+    async def _process_pending_publishes(self, page: Page) -> None:
+        """Publish listings that were created but could not be published yet."""
+        cutoff = utcnow() - timedelta(minutes=2)
+        async with self.db.session() as session:
+            rows = list(
+                await session.scalars(
+                    select(Sale)
+                    .where(
+                        Sale.status == "relisted",
+                        Sale.boost_state == "publish_failed",
+                        Sale.relisted_at.is_not(None),
+                        Sale.relisted_at <= cutoff,
+                    )
+                    .order_by(Sale.relisted_at.asc())
+                    .limit(self.config.max_sales_per_cycle)
+                )
+            )
+        for row in rows:
+            if self._stop_event.is_set():
+                return
+            if not row.lot_url:
+                continue
+            logger.info("Retrying the publication of %s", row.external_id)
+            await self._publish_without_premium(page, row, row.lot_url)
 
     async def _process_pending_boosts(self, page: Page) -> None:
         settings = await self.settings.get()

@@ -1453,24 +1453,29 @@ class PlayerokClient:
         )
         if not sha256_hash or not item.id:
             return None
-        try:
-            data = await self._graphql_persisted(
-                page,
-                operation,
-                {"itemId": item.id, "price": int(item.price or 0)},
-                sha256_hash,
+        for attempt in range(5):
+            try:
+                data = await self._graphql_persisted(
+                    page,
+                    operation,
+                    {"itemId": item.id, "price": int(item.price or 0)},
+                    sha256_hash,
+                )
+            except PlayerokError as exc:
+                logger.warning("Cannot read the priority options: %s", exc)
+                data = {}
+            statuses = data.get("itemPriorityStatuses")
+            if isinstance(statuses, list):
+                for entry in statuses:
+                    if not isinstance(entry, dict):
+                        continue
+                    if str(entry.get("type") or "").upper() == "DEFAULT":
+                        return str(entry.get("id") or "") or None
+            # A fresh listing is not indexed right away - wait and try again.
+            logger.info(
+                "Priority options are not ready yet (attempt %s)", attempt + 1
             )
-        except PlayerokError as exc:
-            logger.warning("Cannot read the priority options: %s", exc)
-            return None
-        statuses = data.get("itemPriorityStatuses")
-        if not isinstance(statuses, list):
-            return None
-        for entry in statuses:
-            if not isinstance(entry, dict):
-                continue
-            if str(entry.get("type") or "").upper() == "DEFAULT":
-                return str(entry.get("id") or "") or None
+            await page.wait_for_timeout(10000)
         return None
 
     async def _premium_price(self, page: Page, item: ItemInfo) -> Decimal | None:
