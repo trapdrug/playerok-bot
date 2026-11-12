@@ -285,10 +285,22 @@ class PlayerokClient:
         response = await self._goto(page, self._absolute(auth_path))
 
         body = await self._body_text(page)
+        challenge = self._is_challenge(body)
+        if challenge:
+            # The anti-bot page answers 403 as well; that is not an expired
+            # session. The page verifies itself and the bot waits for it.
+            logger.info("Playerok is still verifying the browser, waiting")
+            await page.wait_for_timeout(
+                max(5, self.config.challenge_wait_seconds) * 1000
+            )
+            response = await self._goto(page, self._absolute(auth_path))
+            body = await self._body_text(page)
+            challenge = self._is_challenge(body)
+
         login_form = await self._find_visible(
             page, "session.login_form", timeout_ms=1200
         )
-        if (
+        if not challenge and (
             (response is not None and response.status in (401, 403))
             or "/profile/auth" in page.url
             or login_form is not None
@@ -523,7 +535,7 @@ class PlayerokClient:
             for index in range(len(images))
         }
         endpoint = str(self.selectors.get("graphql.endpoint", "/graphql"))
-        result = await self._evaluate_with_retry(
+        result = await self._run_graphql_fetch(
             page,
             """
             async ({endpoint, operations, map, images}) => {
@@ -1079,6 +1091,23 @@ class PlayerokClient:
             return
         await self._goto(page, self._absolute("/profile"))
 
+    async def _run_graphql_fetch(
+        self, page: Page, script: str, argument: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Run a GraphQL fetch and wait out the anti-bot challenge if needed.
+
+        Playerok answers 401/403 on the API while its browser verification
+        page is shown. The verification resolves itself, so the call is
+        repeated once after the wait.
+        """
+        result = await self._evaluate_with_retry(page, script, argument)
+        status = int(result.get("status") or 0)
+        if status in (401, 403):
+            logger.info("GraphQL got %s, waiting for the browser check", status)
+            await self._wait_for_challenge(page)
+            result = await self._evaluate_with_retry(page, script, argument)
+        return result
+
     async def _evaluate_with_retry(
         self, page: Page, script: str, argument: dict[str, Any]
     ) -> Any:
@@ -1109,7 +1138,7 @@ class PlayerokClient:
                 r"\bquery\s+([A-Za-z_][A-Za-z0-9_]*)", query
             )
             operation_name = match.group(1) if match else None
-        result = await self._evaluate_with_retry(
+        result = await self._run_graphql_fetch(
             page,
             """
             async ({endpoint, query, variables, operationName}) => {
@@ -1175,7 +1204,7 @@ class PlayerokClient:
         """Run an Apollo persisted query exactly as the Playerok frontend does."""
         await self._ensure_origin(page)
         endpoint = str(self.selectors.get("graphql.endpoint", "/graphql"))
-        result = await self._evaluate_with_retry(
+        result = await self._run_graphql_fetch(
             page,
             """
             async ({endpoint, operationName, variables, sha256Hash}) => {
@@ -1841,7 +1870,7 @@ class PlayerokClient:
         if response is not None and response.status == 429:
             raise RateLimitError("Playerok вернул 429")
         await self._check_page_errors(page)
-        await self._wait_for_challenge(page)
+        response = (await self._wait_for_challenge(page)) or response
         # A freshly created listing may answer "not found" for a short while.
         for _ in range(5):
             body = (await self._body_text(page)).lower()
@@ -1859,7 +1888,15 @@ class PlayerokClient:
         await self._wait_for_content(page)
         return response
 
-    async def _wait_for_challenge(self, page: Page) -> None:
+    def _is_challenge(self, body: str) -> bool:
+        markers = [
+            marker.lower()
+            for marker in self.selectors.strings("errors.challenge_texts")
+        ]
+        lowered = (body or "").lower()
+        return any(marker in lowered for marker in markers)
+
+    async def _wait_for_challenge(self, page: Page) -> Response | None:
         """Wait out the Playerok "browser verification" page.
 
         Playerok shows this page for an IP it has not seen before. The page
@@ -1871,14 +1908,15 @@ class PlayerokClient:
             for marker in self.selectors.strings("errors.challenge_texts")
         ]
         if not markers:
-            return
+            return None
+        response: Response | None = None
         for attempt in range(self.config.challenge_max_attempts):
             try:
                 body = (await self._body_text(page)).lower()
             except Exception:  # noqa: BLE001
                 body = ""
             if not any(marker in body for marker in markers):
-                return
+                return response
             logger.info(
                 "Playerok browser challenge detected (attempt %s), waiting",
                 attempt + 1,
@@ -1887,13 +1925,14 @@ class PlayerokClient:
                 max(5, self.config.challenge_wait_seconds) * 1000
             )
             try:
-                await page.reload(
+                response = await page.reload(
                     wait_until="domcontentloaded",
                     timeout=self.config.navigation_timeout_ms,
                 )
             except Exception:  # noqa: BLE001
-                return
+                return response
         logger.warning("Playerok browser challenge did not pass")
+        return response
 
     @staticmethod
     def _is_network_error(exc: Exception) -> bool:
