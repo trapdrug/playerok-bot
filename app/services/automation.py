@@ -232,6 +232,9 @@ class AutomationService:
                 await self._process_pending_publishes(page)
                 await self._process_pending_boosts(page)
         finally:
+            # Reap the browser processes that lost their parent: the bot runs
+            # as PID 1 in the container and nobody else would do it.
+            await self.client.reap_zombies()
             # A fresh browser every few cycles keeps the memory and the page
             # state clean without paying the start-up cost every time.
             self._cycles_since_restart += 1

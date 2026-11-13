@@ -4,6 +4,7 @@ import asyncio
 import base64
 import json
 import logging
+import os
 import random
 import re
 from contextlib import asynccontextmanager
@@ -2350,6 +2351,45 @@ class PlayerokClient:
                 await asyncio.wait_for(process.wait(), timeout=10)
             except Exception as exc:  # noqa: BLE001
                 logger.debug("Cannot kill %s processes: %s", pattern, exc)
+
+    async def reap_zombies(self) -> int:
+        """Reap the orphaned browser processes.
+
+        The bot runs as PID 1 in the container, so every browser process that
+        loses its parent is reparented to us. Without reaping them they pile
+        up as zombies until the container runs out of process slots and the
+        bot dies with "can't start new thread".
+        """
+        reaped = 0
+        try:
+            own_pid = os.getpid()
+        except Exception:  # noqa: BLE001
+            return 0
+        for entry in os.listdir("/proc"):
+            if not entry.isdigit():
+                continue
+            pid = int(entry)
+            if pid == own_pid:
+                continue
+            try:
+                with open(f"/proc/{pid}/stat") as handle:
+                    stat = handle.read()
+                # "pid (comm) state ppid ..." - the comm may contain spaces.
+                tail = stat[stat.rindex(")") + 2 :].split()
+                state = tail[0]
+                parent = int(tail[1])
+            except Exception:  # noqa: BLE001
+                continue
+            if state != "Z" or parent != own_pid:
+                continue
+            try:
+                os.waitpid(pid, os.WNOHANG)
+                reaped += 1
+            except Exception:  # noqa: BLE001
+                continue
+        if reaped:
+            logger.info("Reaped %s zombie browser processes", reaped)
+        return reaped
 
     async def browser_process_count(self) -> int:
         """Return the number of running Chromium processes."""
