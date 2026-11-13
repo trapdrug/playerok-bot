@@ -1572,6 +1572,21 @@ class PlayerokClient:
                 ),
             )
 
+        # The money is taken from the available balance, so it has to be
+        # enough before the purchase is started.
+        if effective is not None:
+            balance = await self.fetch_balance(page)
+            if balance is not None and balance < effective:
+                return BoostOutcome(
+                    status="deferred",
+                    amount=effective,
+                    source="main",
+                    reason=(
+                        f"Недостаточно доступных средств на балансе: "
+                        f"{money(balance)} из {money(effective)}"
+                    ),
+                )
+
         outcome = await self.increase_priority(page, item.id, premium_id)
         if outcome.status == "success" and outcome.amount is None:
             outcome.amount = premium_price
