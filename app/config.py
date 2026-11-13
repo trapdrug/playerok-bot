@@ -40,6 +40,10 @@ class AppConfig(BaseSettings):
     cycle_timeout_seconds: int = 300
     # How often the browser is restarted (releases memory and stuck pages).
     browser_restart_cycles: int = 5
+    # Kill leftover Chromium processes when the browser does not close in time.
+    kill_stuck_browser: bool = True
+    # If more Chromium processes are running than this, the browser is restarted.
+    max_browser_processes: int = 40
     # Playerok shows a "browser verification" page for unknown IP addresses.
     # The page verifies itself and reloads; the bot waits and retries.
     challenge_wait_seconds: int = 15

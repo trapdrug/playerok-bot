@@ -130,6 +130,9 @@ class AutomationService:
                     "Cycle exceeded %ss and was aborted",
                     self.config.cycle_timeout_seconds,
                 )
+                # The aborted cycle may still hold a browser: get rid of it,
+                # otherwise the leftover processes eat all the memory.
+                await self.client.restart_browser()
             except StopRequestedError:
                 logger.info("Automation cycle stopped by request")
             except SessionExpiredError as exc:
@@ -162,8 +165,11 @@ class AutomationService:
                     # The page navigated while the bot was reading it. This is
                     # a transient browser hiccup, not a failure of the task.
                     logger.warning("Cycle interrupted by a page navigation: %s", exc)
+                    await self.client.restart_browser()
                     return
                 logger.exception("Automation cycle failed")
+                # The browser may be broken: start the next cycle with a new one.
+                await self.client.restart_browser()
                 await self.notifications.generic_error(str(exc))
 
     # ------------------------------------------------------------------ cycle
@@ -229,7 +235,15 @@ class AutomationService:
             # A fresh browser every few cycles keeps the memory and the page
             # state clean without paying the start-up cost every time.
             self._cycles_since_restart += 1
-            if self._cycles_since_restart >= self.config.browser_restart_cycles:
+            processes = await self.client.browser_process_count()
+            if processes > self.config.max_browser_processes:
+                logger.warning(
+                    "Too many browser processes (%s), restarting the browser",
+                    processes,
+                )
+                self._cycles_since_restart = 0
+                await self.client.restart_browser()
+            elif self._cycles_since_restart >= self.config.browser_restart_cycles:
                 self._cycles_since_restart = 0
                 await self.client.restart_browser()
 

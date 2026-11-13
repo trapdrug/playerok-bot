@@ -298,6 +298,7 @@ class PlayerokClient:
                 logger.warning("Browser was closed with the context")
                 async with self._browser_lock:
                     self._browser = None
+                await self._kill_browser_processes()
 
     @staticmethod
     async def _handle_dialog(dialog) -> None:  # noqa: ANN001
@@ -2326,6 +2327,44 @@ class PlayerokClient:
                     self._browser.close(), 20, "browser.close"
                 )
                 self._browser = None
+        await self._kill_browser_processes()
+
+    async def _kill_browser_processes(self) -> None:
+        """Remove leftover Chromium processes.
+
+        A browser that does not close in time keeps its processes alive and
+        slowly eats the memory of the service. The container runs only this
+        bot, so every leftover belongs to us.
+        """
+        if not self.config.kill_stuck_browser:
+            return
+        for pattern in ("headless_shell", "chrome-linux"):
+            try:
+                process = await asyncio.create_subprocess_exec(
+                    "pkill",
+                    "-f",
+                    pattern,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                await asyncio.wait_for(process.wait(), timeout=10)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("Cannot kill %s processes: %s", pattern, exc)
+
+    async def browser_process_count(self) -> int:
+        """Return the number of running Chromium processes."""
+        try:
+            process = await asyncio.create_subprocess_exec(
+                "pgrep",
+                "-fc",
+                "headless_shell",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            stdout, _ = await asyncio.wait_for(process.communicate(), timeout=10)
+            return int((stdout or b"0").strip() or 0)
+        except Exception:  # noqa: BLE001
+            return 0
 
     @staticmethod
     def _is_network_error(exc: Exception) -> bool:
