@@ -220,9 +220,24 @@ class AutomationService:
                             await self.settings.set_items_in_sale(items_count)
 
                 logger.info("Cycle: fetching sales")
-                sales = await self.client.fetch_sales(
-                    page, session.username, session.user_id
-                )
+                try:
+                    sales = await self.client.fetch_sales(
+                        page, session.username, session.user_id
+                    )
+                except (
+                    SessionExpiredError,
+                    RateLimitError,
+                    CaptchaError,
+                    LayoutChangedError,
+                    StopRequestedError,
+                ):
+                    raise
+                except PlayerokError as exc:
+                    # Playerok is temporarily unavailable (5xx, timeout). This
+                    # is not a layout change: keep the bot running and try
+                    # again on the next cycle.
+                    logger.warning("Cannot read the sales list: %s", exc)
+                    return
                 if not settings.sales_initialized:
                     await self._store_baseline(sales)
                     return

@@ -381,12 +381,38 @@ class PlayerokClient:
         user_id: str | None = None,
     ) -> list[SaleInfo]:
         if bool(self.selectors.get("sales.use_graphql", True)):
+            transient = False
+            for attempt in range(2):
+                try:
+                    return await self._fetch_sales_graphql(page, username, user_id)
+                except (SessionExpiredError, RateLimitError, CaptchaError):
+                    raise
+                except LayoutChangedError as exc:
+                    # The API answered, but the shape changed: only this is a
+                    # real reason to fall back to the page markup.
+                    logger.warning(
+                        "GraphQL sales layout error, trying DOM fallback: %s", exc
+                    )
+                    break
+                except PlayerokError as exc:
+                    # Timeouts, HTTP 5xx and broken responses are temporary.
+                    transient = True
+                    logger.warning(
+                        "GraphQL sales failed (%s/2): %s", attempt + 1, exc
+                    )
+                    if attempt == 0:
+                        await asyncio.sleep(2)
             try:
-                return await self._fetch_sales_graphql(page, username, user_id)
-            except (SessionExpiredError, RateLimitError, CaptchaError):
+                return await self._fetch_sales_dom(page, username)
+            except LayoutChangedError as exc:
+                if transient:
+                    # A broken fallback after a temporary API error is not a
+                    # layout change. Retry the whole thing on the next cycle
+                    # instead of stopping every task of the bot.
+                    raise PlayerokError(
+                        f"Не удалось прочитать список продаж: {exc}"
+                    ) from exc
                 raise
-            except PlayerokError as exc:
-                logger.warning("GraphQL sales failed, trying DOM fallback: %s", exc)
         return await self._fetch_sales_dom(page, username)
 
     async def _wait_for_item(
@@ -1068,7 +1094,15 @@ class PlayerokClient:
     ) -> list[SaleInfo]:
         sales_url = self._absolute(self.selectors.url("sales", username=username))
         await self._goto(page, sales_url)
-        await page.wait_for_timeout(1200)
+        # The sales page is a single-page app: the cards appear a few seconds
+        # after the navigation. Waiting for the selector is much more reliable
+        # than a fixed pause, otherwise a slow load looks like a layout change.
+        try:
+            await page.wait_for_selector(
+                'a[href*="/deal/"]', timeout=15000, state="attached"
+            )
+        except Exception:  # noqa: BLE001 - the empty state has no deal links
+            await page.wait_for_timeout(1500)
 
         cards = await self._find_all(page, "sales.cards")
         if cards is None:
@@ -1164,59 +1198,84 @@ class PlayerokClient:
         (CPU hungry) Playerok SPA and has real timeouts.
         """
         request = page.context.request
-        try:
-            if method == "GET":
-                response = await request.get(
-                    url,
-                    params=params,
-                    headers=headers,
-                    timeout=self.config.browser_timeout_ms,
-                    fail_on_status_code=False,
-                )
-            else:
-                if multipart is not None:
-                    response = await request.post(
+        response = None
+        last_error = ""
+        for attempt in range(3):
+            try:
+                if method == "GET":
+                    response = await request.get(
                         url,
-                        multipart=multipart,
+                        params=params,
                         headers=headers,
                         timeout=self.config.browser_timeout_ms,
                         fail_on_status_code=False,
                     )
                 else:
-                    request_headers = dict(headers or {})
-                    request_headers.setdefault("content-type", "application/json")
-                    response = await request.post(
-                        url,
-                        data=json.dumps(json_body or {}),
-                        headers=request_headers,
-                        timeout=self.config.browser_timeout_ms,
-                        fail_on_status_code=False,
+                    if multipart is not None:
+                        response = await request.post(
+                            url,
+                            multipart=multipart,
+                            headers=headers,
+                            timeout=self.config.browser_timeout_ms,
+                            fail_on_status_code=False,
+                        )
+                    else:
+                        request_headers = dict(headers or {})
+                        request_headers.setdefault(
+                            "content-type", "application/json"
+                        )
+                        response = await request.post(
+                            url,
+                            data=json.dumps(json_body or {}),
+                            headers=request_headers,
+                            timeout=self.config.browser_timeout_ms,
+                            fail_on_status_code=False,
+                        )
+            except Exception as exc:  # noqa: BLE001
+                response = None
+                last_error = f"request failed: {exc}"
+            if response is None:
+                if attempt < 2:
+                    logger.warning(
+                        "GraphQL request failed (%s/3), retrying: %s",
+                        attempt + 1,
+                        last_error[:160],
                     )
-        except Exception as exc:  # noqa: BLE001
-            return {"status": 0, "text": f"request failed: {exc}", "json": None}
+                    await asyncio.sleep(2 + attempt * 2)
+                    continue
+                return {"status": 0, "text": last_error, "json": None}
 
-        status = int(response.status)
-        text = await response.text()
-        payload = None
-        try:
-            payload = json.loads(text)
-        except Exception:  # noqa: BLE001
+            status = int(response.status)
+            text = await response.text()
             payload = None
-        if status in (401, 403) and payload is None:
-            # A plain text 401/403 means the anti-bot page answered instead of
-            # the API. The browser check is retried once.
-            logger.info("GraphQL got %s, waiting for the browser check", status)
-            await self._wait_for_challenge(page)
-            return await self._run_graphql_request(
-                page,
-                method,
-                url,
-                headers=headers,
-                params=params,
-                json_body=json_body,
-                multipart=multipart,
-            )
-        return {"status": status, "text": text[:4000], "json": payload}
+            try:
+                payload = json.loads(text)
+            except Exception:  # noqa: BLE001
+                payload = None
+            # Playerok answers 502/503/504 during deploys and maintenance. Those
+            # are temporary, so retry instead of treating them as a failure.
+            if (status in (0, 408) or status >= 500) and attempt < 2:
+                logger.warning(
+                    "GraphQL HTTP %s (%s/3), retrying", status, attempt + 1
+                )
+                await asyncio.sleep(2 + attempt * 2)
+                continue
+            if status in (401, 403) and payload is None:
+                # A plain text 401/403 means the anti-bot page answered instead
+                # of the API. The browser check is retried once.
+                logger.info("GraphQL got %s, waiting for the browser check", status)
+                await self._wait_for_challenge(page)
+                return await self._run_graphql_request(
+                    page,
+                    method,
+                    url,
+                    headers=headers,
+                    params=params,
+                    json_body=json_body,
+                    multipart=multipart,
+                )
+            return {"status": status, "text": text[:4000], "json": payload}
+        return {"status": 0, "text": last_error, "json": None}
 
     async def _run_with_timeout(
         self,
