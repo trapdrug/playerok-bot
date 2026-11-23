@@ -1099,6 +1099,16 @@ class AutomationService:
 
     async def _warn_about_uncertain_operations(self) -> None:
         async with self.db.session() as session:
+            # Older versions marked this pre-publication failure as uncertain.
+            await session.execute(
+                update(Sale)
+                .where(
+                    Sale.status == "relist_uncertain",
+                    Sale.relisted_at.is_(None),
+                    Sale.error == "Не удалось получить картинки товара — копию создать нельзя",
+                )
+                .values(status="relist_failed")
+            )
             uncertain_relist = list(
                 await session.scalars(
                     select(Sale).where(

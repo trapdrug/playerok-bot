@@ -3,11 +3,12 @@ from __future__ import annotations
 import asyncio
 from decimal import Decimal
 from pathlib import Path
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
 from app.config import AppConfig
-from app.playerok.client import PlayerokClient
+from app.playerok.client import ItemInfo, PlayerokClient
 from app.playerok.exceptions import LayoutChangedError, PlayerokError
 from app.playerok.selectors import Selectors
 
@@ -16,6 +17,27 @@ SELECTORS_FILE = Path(__file__).resolve().parents[1] / "selectors.yaml"
 
 def _client(config: AppConfig) -> PlayerokClient:
     return PlayerokClient(config, Selectors(SELECTORS_FILE))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("urls", [[], ["https://i.playerok.com/photo.jpg"]])
+async def test_missing_picture_fails_only_the_sale(config, monkeypatch, urls):
+    client = _client(config)
+    item = ItemInfo(
+        id="1", slug="sold", name="Example", price=Decimal("100"),
+        description="", attributes={}, game_category_id="category",
+        obtaining_type_id="type", data_fields=[], attachment_urls=urls,
+    )
+    page = Mock()
+    page.context.request.get = AsyncMock(return_value=Mock(ok=False, status=503))
+    create = AsyncMock()
+    monkeypatch.setattr(client, "_before_action", AsyncMock())
+    monkeypatch.setattr(client, "_create_item_mutation", create)
+    with pytest.raises(PlayerokError) as error:
+        await client.create_listing(page, item, dry_run=False)
+    assert not isinstance(error.value, LayoutChangedError)
+    assert "sold" in str(error.value)
+    create.assert_not_awaited()
 
 
 def test_parse_premium_price_from_promo_button():

@@ -542,32 +542,34 @@ class PlayerokClient:
         # The listing data is already read through the API, so the heavy item
         # page does not have to be loaded at all.
 
+        if not item.attachment_urls:
+            raise PlayerokError(f"У товара {item.slug} нет ссылок на изображения")
+        referer = self._absolute(self.selectors.url("item", slug=item.slug))
         images: list[tuple[str, str]] = []
         for url in item.attachment_urls[:3]:
             try:
-                response = await page.context.request.get(url)
+                response = await page.context.request.get(
+                    url, headers={"Referer": referer}, timeout=15000
+                )
                 if not response.ok:
-                    logger.warning(
-                        "Picture download failed (%s): HTTP %s", url, response.status
-                    )
-                    continue
+                    raise PlayerokError(f"HTTP {response.status}")
                 body = await response.body()
                 if not body:
-                    logger.warning("Picture is empty: %s", url)
-                    continue
+                    raise PlayerokError("пустой ответ")
+                mime = response.headers.get("content-type", "image/jpeg").split(";")[0]
+                if not mime.startswith("image/") and mime != "application/octet-stream":
+                    raise PlayerokError(f"ожидалось изображение, получено {mime}")
                 images.append(
                     (
                         base64.b64encode(body).decode("ascii"),
-                        response.headers.get("content-type", "image/jpeg"),
+                        mime,
                     )
                 )
             except Exception as exc:  # noqa: BLE001
-                logger.warning("Cannot download item picture %s: %s", url, exc)
-
-        if not images:
-            raise LayoutChangedError(
-                "Не удалось получить картинки товара — копию создать нельзя"
-            )
+                raise PlayerokError(
+                    f"Не удалось загрузить изображение {len(images) + 1} "
+                    f"товара {item.slug}: {exc}"
+                ) from exc
 
         payload = {
             "input": {
