@@ -435,15 +435,12 @@ class PlayerokClient:
             logger.warning("Listing %s is not available yet: %s", slug, last_error)
         return None
 
-    def skip_boost_reason(self, title: str | None) -> str | None:
-        """Return the trigger phrase that forbids boosting this title.
-
-        The listing is still published, only without premium.
-        """
+    def skip_relist_reason(self, title: str | None) -> str | None:
+        """Return the title phrase that excludes the sold item from automatic relisting."""
         if not title:
             return None
         lowered = title.casefold()
-        for phrase in self.selectors.strings("boost.skip_titles"):
+        for phrase in self.selectors.strings("relist.skip_titles"):
             needle = str(phrase).strip().casefold()
             if not needle:
                 continue

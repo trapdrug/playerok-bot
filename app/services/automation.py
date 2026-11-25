@@ -464,7 +464,15 @@ class AutomationService:
             # The Playerok button "Выставить повторно" is not used: it only
             # reactivates the old item instead of creating a new one.
             item = await self.client.fetch_item(page, slug)
-            skip_reason = self.client.skip_boost_reason(item.name)
+            skip_reason = self.client.skip_relist_reason(item.name)
+            if skip_reason:
+                await self._set_sale_fields(row.id, status="relist_skipped", error=None)
+                await self.audit.log(
+                    "relist_skipped",
+                    f"Сделка {info.external_id}: автовыставление пропущено "
+                    f"по названию («{skip_reason}»)",
+                )
+                return
             result = await self.client.create_listing(
                 page, item, dry_run=bool(settings.dry_run)
             )
@@ -530,18 +538,6 @@ class AutomationService:
             ),
         )
 
-        if skip_reason:
-            # The trigger forbids buying premium for such listings, but the
-            # listing still goes on sale.
-            await self.audit.log(
-                "boost_skipped_trigger",
-                f"Сделка {info.external_id}: буст пропущен, сработал триггер "
-                f"«{skip_reason}»",
-            )
-            await self.notifications.boost_skipped(
-                row, f"Сработал триггер «{skip_reason}»"
-            )
-
         if not lot_url or result.dry_run:
             if settings.auto_boost_enabled and result.dry_run:
                 await self.notifications.boost_deferred(
@@ -556,8 +552,7 @@ class AutomationService:
             page,
             row,
             lot_url,
-            premium=bool(settings.auto_boost_enabled) and not skip_reason,
-            reason=skip_reason,
+            premium=bool(settings.auto_boost_enabled),
             item_full_price=raw_price,
         )
 
@@ -568,7 +563,6 @@ class AutomationService:
         lot_url: str,
         *,
         premium: bool,
-        reason: str | None = None,
         item_full_price: Decimal | None = None,
     ) -> None:
         """Publish a fresh listing through the API, with premium if allowed."""
@@ -620,8 +614,7 @@ class AutomationService:
         sale.boost_state = "without_premium"
         await self.audit.log(
             "published_without_premium",
-            f"Сделка {sale.external_id}: объявление выставлено"
-            + (f" ({reason})" if reason else ""),
+            f"Сделка {sale.external_id}: объявление выставлено",
         )
 
         if not premium:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 from sqlalchemy import select
@@ -12,9 +13,11 @@ from app.playerok.client import (
     ChatInfo,
     ItemInfo,
     ListingResult,
+    PlayerokClient,
     SaleInfo,
     SessionInfo,
 )
+from app.playerok.selectors import Selectors
 from app.services.audit import AuditService
 from app.services.automation import AutomationService
 from app.services.cookies import CookieStatus
@@ -31,6 +34,7 @@ class FakePageSession:
 
 class FakeClient:
     def __init__(self, sales: list[SaleInfo]) -> None:
+        self.selectors = Selectors(Path(__file__).resolve().parents[1] / "selectors.yaml")
         self.sales = sales
         self.chats: list[ChatInfo] = []
         self.listing_calls: list[str] = []
@@ -76,12 +80,7 @@ class FakeClient:
             attachment_urls=[],
         )
 
-    def skip_boost_reason(self, title):
-        lowered = (title or "").casefold()
-        for phrase in ("доплата подарка", "доплата подарок"):
-            if phrase in lowered:
-                return phrase
-        return None
+    skip_relist_reason = PlayerokClient.skip_relist_reason
 
     async def create_listing(self, page, item, *, dry_run):
         self.listing_calls.append(item.slug)
@@ -342,17 +341,18 @@ async def test_relist_without_boost_publishes_listing(db, config):
 
 
 @pytest.mark.asyncio
-async def test_skip_trigger_publishes_listing_without_boost(db, config):
+@pytest.mark.parametrize("relist,boost", [(True, True), (True, False), (False, True)])
+async def test_skip_trigger_prevents_copy(db, config, relist, boost):
     client = FakeClient([make_sale("1")])
-    client.item_title = "ДОПЛАТА ПОДАРКА"
+    client.item_title = "Подарок — ДоПлАтА за доставку"
     cookies = FakeCookies()
     notifications = FakeNotifications()
     _, settings, automation = build_automation(
         db, config, client, cookies, notifications
     )
 
-    await settings.set_feature("auto_relist_enabled", True)
-    await settings.set_feature("auto_boost_enabled", True)
+    await settings.set_feature("auto_relist_enabled", relist)
+    await settings.set_feature("auto_boost_enabled", boost)
     await settings.set_feature("dry_run", False)
     await automation.initialize()
 
@@ -360,11 +360,14 @@ async def test_skip_trigger_publishes_listing_without_boost(db, config):
     client.sales = [make_sale("1"), make_sale("2")]
     await automation.run_cycle()
 
-    assert client.listing_calls == ["2"]
-    # The trigger forbids buying premium for this title.
+    await automation.run_cycle()
+    assert client.fetched_items == ["2"]
+    assert client.listing_calls == []
+    assert client.publish_calls == []
     assert client.boost_calls == []
-    # But the listing is still published, without premium.
-    assert client.publish_calls == ["https://playerok.com/products/copy-2"]
+    async with db.session() as session:
+        row = await session.scalar(select(Sale).where(Sale.external_id == "2"))
+        assert row.status == "relist_skipped"
 
 
 @pytest.mark.asyncio

@@ -147,6 +147,8 @@ sales:
       name: "Загрузить ещё"
 
 relist:
+  skip_titles:
+    - "доплата"
   # Buttons that duplicate/relist an already sold lot with the same parameters.
   entry_buttons:
     - role: "button"
@@ -177,12 +179,6 @@ relist:
     - "Товар снова в продаже"
 
 boost:
-  # Titles that must never be boosted. A new listing with such a title is
-  # still published, but without premium. Matching is case-insensitive and
-  # works as a substring of the listing name.
-  skip_titles:
-    - "доплата подарка"
-    - "доплата подарок"
   # Opens the promotion screen of a listing.
   # "Выставить" is shown for a fresh draft, "Повысить статус" for a regular
   # listing, "Поднять в топ" for a premium one.
