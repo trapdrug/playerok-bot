@@ -683,6 +683,7 @@ class PlayerokClient:
         lot_url: str,
         *,
         dry_run: bool,
+        renewal: bool = False,
         remaining_budget: Decimal,
         max_amount: Decimal | None = None,
         item_full_price: Decimal | None = None,
@@ -693,7 +694,8 @@ class PlayerokClient:
 
         # 1. Open the promotion screen ("Выставить" / "Повысить статус" /
         #    "Поднять в топ").
-        entry = await self._find_visible(page, "boost.entry_buttons", timeout_ms=15000)
+        entry_path = "boost.renew_entry" if renewal else "boost.entry_buttons"
+        entry = await self._find_visible(page, entry_path, timeout_ms=15000)
         if entry is None:
             # A freshly created listing may need a moment before its page
             # shows the seller controls.
@@ -702,7 +704,7 @@ class PlayerokClient:
                 await self._wait_for_item(page, slug, timeout_ms=60000)
                 await self._goto(page, lot_url)
                 entry = await self._find_visible(
-                    page, "boost.entry_buttons", timeout_ms=15000
+                    page, entry_path, timeout_ms=15000
                 )
         if entry is None:
             raise LayoutChangedError(
@@ -719,7 +721,7 @@ class PlayerokClient:
         # 3. Confirm the promotion. The button contains the price, e.g.
         #    "Повысить до Премиум за 99 ₽ 149".
         confirm = await self._find_visible(
-            page, "boost.confirm_buttons", timeout_ms=4000
+            page, "boost.renew_confirm" if renewal else "boost.confirm_buttons", timeout_ms=4000
         )
         if confirm is None:
             raise LayoutChangedError(
@@ -769,9 +771,13 @@ class PlayerokClient:
                 "и boost.confirm_buttons в selectors.yaml."
             )
 
+        if not await self._select_balance(dialog):
+            await self._close_dialog(page, dialog)
+            return BoostOutcome("skipped", premium_price, "unknown", "Баланс недоступен для оплаты")
         inspection = await self._inspect_payment(dialog)
-        if premium_price is not None and inspection.amount is None:
-            inspection.amount = premium_price
+        if inspection.amount is None or inspection.amount != premium_price:
+            await self._close_dialog(page, dialog)
+            return BoostOutcome("skipped", inspection.amount, "main", "Не подтверждена итоговая цена премиума")
 
         # The window may show a different amount than the promotion screen.
         if max_amount is not None and inspection.amount is not None:
@@ -832,7 +838,7 @@ class PlayerokClient:
             )
 
         pay = await self._find_visible(
-            dialog, "payment.pay_buttons", timeout_ms=2000
+            dialog, "payment.checkout_button" if renewal else "payment.pay_buttons", timeout_ms=2000
         )
         if pay is None:
             await self._close_dialog(page, dialog)
@@ -841,30 +847,27 @@ class PlayerokClient:
             )
 
         await self._before_action()
-        await self._safe_click(pay)
-        await self._wait_for_texts(page, "payment.success_texts", timeout_ms=8000)
-        dialog_gone = await self._dialog_gone(page, dialog)
-        if not dialog_gone:
-            await page.wait_for_timeout(1200)
-            dialog_gone = await self._dialog_gone(page, dialog)
-        if not dialog_gone:
-            raise PaymentUncertainError(
-                "Оплата буста отправлена, но платёжное окно не закрылось. "
-                "Проверьте аккаунт вручную; автобуст остановлен."
-            )
-
-        error_texts = [
-            text.lower()
-            for text in self.selectors.strings("payment.error_texts")
-            if text
-        ]
-        if error_texts:
-            body = (await self._body_text(page)).lower()
-            if any(text in body for text in error_texts):
-                raise PaymentUncertainError(
-                    "После оплаты появилось сообщение об ошибке. "
-                    "Проверьте аккаунт вручную; автобуст остановлен."
-                )
+        before = await self.fetch_balance(page)
+        if before is None or before < inspection.amount:
+            await self._close_dialog(page, dialog)
+            return BoostOutcome("skipped", inspection.amount, "main", "Недостаточно доступного баланса")
+        final = await self._inspect_payment(dialog)
+        if final.source != "main" or final.amount != inspection.amount:
+            await self._close_dialog(page, dialog)
+            return BoostOutcome("skipped", final.amount, final.source, "Условия оплаты изменились")
+        try:
+            await pay.click(timeout=8000)
+            confirmed = await self._wait_for_texts(page, "payment.success_texts", timeout_ms=8000)
+            if not confirmed:
+                after = await self.fetch_balance(page)
+                confirmed = (after is not None and before - after == final.amount
+                             and final.amount > 0 and await self._dialog_gone(page, dialog))
+        except Exception as exc:
+            raise PaymentUncertainError("Проверьте последнее списание в PlayerOK") from exc
+        body = (await self._body_text(page)).casefold()
+        errors = self.selectors.strings("payment.error_texts")
+        if not confirmed or any(marker.casefold() in body for marker in errors):
+            raise PaymentUncertainError("PlayerOK не подтвердил оплату премиума")
 
         return BoostOutcome(
             status="success",
@@ -1683,8 +1686,13 @@ class PlayerokClient:
     async def manual_premium(
         self, page: Page, item: ItemInfo, budget: Decimal, dry_run: bool
     ) -> BoostOutcome:
-        if item.status != "APPROVED" or item.priority == "PREMIUM":
-            return BoostOutcome("skipped", None, "main", "Уже премиум или снято с продажи")
+        if item.status != "APPROVED":
+            return BoostOutcome("skipped", None, "main", "Снято с продажи")
+        if item.priority == "PREMIUM":
+            return await self.apply_boost(
+                page, self._absolute(f"/products/{item.slug}"), renewal=True,
+                dry_run=dry_run, remaining_budget=budget, max_amount=budget,
+            )
         options = await self._priority_options(page, item)
         premium = next((row for row in options if row.get("type") == "PREMIUM"), {})
         price = parse_money(premium.get("price"))
@@ -2091,12 +2099,26 @@ class PlayerokClient:
                     text = (await self._inner_text(node)).lower()
                 except Exception:  # noqa: BLE001
                     continue
-                if "оплатить с баланса" in text or "перейти к оплате" in text:
+                if "оплатить с баланса" in text and "перейти к оплате" in text:
                     return node
-            if candidates:
-                return candidates[-1]
             await page.wait_for_timeout(300)
         return None
+
+    async def _select_balance(self, dialog: Locator) -> bool:
+        for spec in self.selectors.specs("payment.balance_switch"):
+            control = self._locator(dialog, spec)
+            if control is None or await control.count() != 1:
+                continue
+            if not await control.is_enabled():
+                return False
+            if not await control.is_checked():
+                label = control.locator("xpath=ancestor::label[1]")
+                if await label.count() and await label.is_visible():
+                    await label.click(timeout=3000)
+                else:
+                    await control.check(timeout=3000)
+            return await control.is_checked()
+        return False
 
     async def _inspect_payment(self, dialog: Locator) -> PaymentInspection:
         """Detect the payment source inside the Playerok payment window.
@@ -2108,14 +2130,13 @@ class PlayerokClient:
         dialog_text = await self._inner_text(dialog)
         lowered = dialog_text.lower()
         frozen_markers = self.selectors.strings("payment.frozen_markers")
-        other_markers = self.selectors.strings("payment.other_source_markers")
 
         balance_checked, balance_text = await self._balance_switch_state(dialog)
         card_checked, card_text = await self._card_source_state(dialog)
 
         source = "unknown"
         source_text = ""
-        if balance_checked:
+        if balance_checked and not card_checked:
             source = "main"
             source_text = balance_text or "Оплатить с баланса (основной баланс)"
         elif card_checked:
@@ -2124,16 +2145,6 @@ class PlayerokClient:
         elif any(marker.lower() in lowered for marker in frozen_markers):
             source = "frozen"
             source_text = "Средства в заморозке"
-
-        if source == "unknown":
-            # Fail-safe: only infer the main balance when the window shows the
-            # balance and no frozen/other source at all.
-            has_frozen = any(marker.lower() in lowered for marker in frozen_markers)
-            has_other = any(marker.lower() in lowered for marker in other_markers)
-            has_main = "с баланса" in lowered or "баланс" in lowered
-            if has_main and not has_frozen and not has_other:
-                source = "main"
-                source_text = "Основной баланс (единственный источник в окне)"
 
         amount = await self._payment_amount(dialog)
         return PaymentInspection(
@@ -2155,8 +2166,6 @@ class PlayerokClient:
             for index in range(min(count, 3)):
                 node = locator.nth(index)
                 try:
-                    if not await node.is_visible():
-                        continue
                     if not await node.is_checked():
                         continue
                 except Exception:  # noqa: BLE001
@@ -2183,8 +2192,6 @@ class PlayerokClient:
             for index in range(min(count, 10)):
                 node = locator.nth(index)
                 try:
-                    if not await node.is_visible():
-                        continue
                     if not await node.is_checked():
                         continue
                 except Exception:  # noqa: BLE001
@@ -2199,46 +2206,13 @@ class PlayerokClient:
                 return True, text.strip()
         return False, ""
 
-    async def _balance_amount(self, dialog: Locator) -> Decimal | None:
-        for spec in self.selectors.specs("payment.balance_labels"):
-            locator = self._locator(dialog, spec)
-            if locator is None:
-                continue
-            try:
-                count = await locator.count()
-            except Exception:  # noqa: BLE001
-                continue
-            for index in range(min(count, 3)):
-                node = locator.nth(index)
-                try:
-                    if not await node.is_visible():
-                        continue
-                    text = await self._inner_text(node)
-                except Exception:  # noqa: BLE001
-                    continue
-                amount = parse_money(text)
-                if amount is not None:
-                    return amount
-        return None
-
     async def _payment_amount(self, dialog: Locator) -> Decimal | None:
-        """Return the amount to pay, ignoring the balance amount."""
-        try:
-            text = await self._inner_text(dialog)
-        except Exception:  # noqa: BLE001
-            return None
-        balance = await self._balance_amount(dialog)
-        amounts: list[Decimal] = []
-        for match in re.findall(r"([\d][\d\s\u00a0.,]*)\s*₽", text):
-            amount = parse_money(match)
-            if amount is None:
-                continue
-            if balance is not None and amount == balance:
-                continue
-            amounts.append(amount)
-        if not amounts:
-            return None
-        return min(amounts)
+        text = await self._inner_text(dialog)
+        match = re.search(
+            r"([\d][\d   .,]*)\s*₽\s*(?:🚀\s*)?Премиум\s*Перейти к оплате",
+            text, re.IGNORECASE,
+        )
+        return parse_money(match.group(1)) if match else None
 
     @staticmethod
     def _parse_premium_price(text: str) -> Decimal | None:

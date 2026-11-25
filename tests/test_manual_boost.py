@@ -38,7 +38,6 @@ async def test_active_listings_follow_cursor_and_filter_seller():
 @pytest.mark.parametrize("budget,preview,priority,expected", [
     (9, False, "DEFAULT", "skipped"),
     (10, True, "DEFAULT", "preview"),
-    (10, False, "PREMIUM", "skipped"),
     (10, False, "DEFAULT", "success"),
 ])
 async def test_manual_premium(budget, preview, priority, expected):
@@ -99,3 +98,52 @@ async def test_worker_can_open_select_and_submit_boost():
     callback.data = rows[-2][0].callback_data
     await select_boost(callback, ctx, worker)
     assert callback.message.edit_text.await_args.args == ("Gift — ✅",)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("dry_run,external,expected,clicks", [
+    (False, False, "success", 1),
+    (True, False, "dry_run", 0),
+    (False, True, "deferred", 0),
+])
+async def test_renew_existing_premium_from_balance(config, dry_run, external, expected, clicks):
+    from pathlib import Path
+    from playwright.async_api import async_playwright
+    from app.playerok.selectors import Selectors
+
+    html = """
+    <button onclick="promo.hidden=false">Поднять в топ</button>
+    <section id="promo" hidden>
+      <label>Премиум<input type="radio" name="itemPriority" checked></label>
+      <button onclick="payment.hidden=false">Обновить Премиум за 13 ₽ <del>37</del></button>
+    </section>
+    <section id="payment" role="dialog" hidden>
+      <label>Оплатить с баланса 6 523,10 ₽
+        <input type="checkbox" name="providerId" value="LOCAL">
+      </label>
+      <label><input type="radio" name="providerId" value="SBP">СБП</label>
+      <div>13 ₽</div><div>🚀 Премиум</div>
+      <button onclick="if(document.querySelector('[value=LOCAL]').checked){window.paid++;payment.hidden=true;receipt.hidden=false}">Перейти к оплате</button>
+    </section>
+    <div hidden id="receipt">Успешно оплачено</div><script>window.paid=0</script>
+    """
+    client = PlayerokClient(config, Selectors(Path(__file__).resolve().parents[1] / "selectors.yaml"))
+    client._before_action = AsyncMock()
+    client._dismiss_cookie_banner = AsyncMock()
+    client.fetch_balance = AsyncMock(return_value=Decimal("6523.10"))
+    async with async_playwright() as playwright:
+        if not Path(playwright.chromium.executable_path).exists():
+            pytest.skip("Install Playwright Chromium for the checkout test")
+        browser = await playwright.chromium.launch(executable_path=playwright.chromium.executable_path)
+        page = await browser.new_page()
+        async def open_listing(page, url):
+            assert url.endswith("/products/test-gift")
+            await page.set_content(html)
+            if external:
+                await page.locator('[value="SBP"]').evaluate("(radio) => radio.checked = true")
+        client._goto = open_listing
+        item = SimpleNamespace(slug="test-gift", status="APPROVED", priority="PREMIUM")
+        result = await client.manual_premium(page, item, Decimal("13"), dry_run)
+        assert (result.status, result.amount) == (expected, Decimal("13"))
+        assert await page.evaluate("window.paid") == clicks
+        await browser.close()

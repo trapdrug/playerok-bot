@@ -179,6 +179,13 @@ relist:
     - "Товар снова в продаже"
 
 boost:
+  renew_entry:
+    - text: "Поднять в топ"
+      exact: true
+  renew_confirm:
+    - role: "button"
+      name: "Обновить Премиум за"
+    - text: "Обновить Премиум за"
   # Opens the promotion screen of a listing.
   # "Выставить" is shown for a fresh draft, "Повысить статус" for a regular
   # listing, "Поднять в топ" for a premium one.
@@ -260,7 +267,7 @@ payment:
     - css: 'input[name="providerId"][value="LOCAL"]'
   # Card / SBP / crypto options are never used by the bot.
   card_radios:
-    - css: 'input[name="providerId"][type="radio"]'
+    - css: 'input[name="providerId"][type="radio"]:not([value="LOCAL"])'
   balance_labels:
     - text: "Оплатить с баланса"
     - css: 'img[alt="balance"]'
@@ -299,6 +306,10 @@ payment:
   price:
     - css: '[class*="price"]'
     - css: '[data-testid*="price"]'
+  checkout_button:
+    - role: "button"
+      name: "Перейти к оплате"
+      exact: true
   pay_buttons:
     - role: "button"
       name: "Перейти к оплате"

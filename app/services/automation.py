@@ -148,7 +148,7 @@ class AutomationService:
                 if outcome.status == "success":
                     await self.settings.record_boost_spend(outcome.amount)
                     result = f"✅ Премиум · {money(outcome.amount)}"
-                elif outcome.status == "preview":
+                elif outcome.status in {"preview", "dry_run"}:
                     result = f"🧪 Тест · {money(outcome.amount)}"
                 else:
                     result = outcome.reason
