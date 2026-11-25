@@ -896,15 +896,13 @@ class PlayerokClient:
             return None
         return parse_money(balance.get("available"))
 
-    async def fetch_items_count(self, page: Page, user_id: str) -> int | None:
-        """Return the number of the seller's listings that are on sale."""
+    async def _items_page(
+        self, page: Page, user_id: str, statuses: list[str], after: str | None = None
+    ) -> dict[str, Any]:
         operation = str(self.selectors.get("graphql.items_operation", "items"))
         sha256_hash = str(self.selectors.get("graphql.items_sha256", "") or "")
         if not sha256_hash:
-            return None
-        statuses = self.selectors.strings("graphql.items_active_statuses") or [
-            "APPROVED"
-        ]
+            raise LayoutChangedError("Не настроен запрос объявлений")
         page_size = int(self.selectors.get("graphql.items_page_size", 16))
         # Playerok rejects page sizes above 16 for this persisted query.
         page_size = max(1, min(page_size, 16))
@@ -912,7 +910,7 @@ class PlayerokClient:
             page,
             operation,
             {
-                "pagination": {"first": page_size},
+                "pagination": {"first": page_size, **({"after": after} if after else {})},
                 "filter": {
                     "userId": user_id,
                     "status": list(statuses),
@@ -924,7 +922,31 @@ class PlayerokClient:
         )
         items = data.get("items")
         if not isinstance(items, dict):
+            raise LayoutChangedError("Playerok не вернул список объявлений")
+        return items
+
+    async def active_listings(self, page: Page, user_id: str) -> dict[str, str]:
+        listings: dict[str, str] = {}
+        seen: set[str] = set()
+        after = None
+        while True:
+            items = await self._items_page(page, user_id, ["APPROVED"], after)
+            for edge in items["edges"]:
+                node = edge["node"]
+                listings[node["slug"]] = node["name"]
+            pagination = items["pageInfo"]
+            if not pagination["hasNextPage"]:
+                return listings
+            after = pagination.get("endCursor")
+            if not after or after in seen:
+                raise LayoutChangedError("Playerok не вернул следующую страницу объявлений")
+            seen.add(after)
+
+    async def fetch_items_count(self, page: Page, user_id: str) -> int | None:
+        statuses = self.selectors.strings("graphql.items_active_statuses") or ["APPROVED"]
+        if not self.selectors.get("graphql.items_sha256"):
             return None
+        items = await self._items_page(page, user_id, statuses)
         total = items.get("totalCount")
         try:
             return int(total) if total is not None else None
@@ -1190,6 +1212,7 @@ class PlayerokClient:
         params: dict[str, str] | None = None,
         json_body: dict[str, Any] | None = None,
         multipart: dict[str, Any] | None = None,
+        retry: bool = True,
     ) -> dict[str, Any]:
         """Call the GraphQL API through the browser context HTTP client.
 
@@ -1234,7 +1257,7 @@ class PlayerokClient:
                 response = None
                 last_error = f"request failed: {exc}"
             if response is None:
-                if attempt < 2:
+                if retry and attempt < 2:
                     logger.warning(
                         "GraphQL request failed (%s/3), retrying: %s",
                         attempt + 1,
@@ -1253,13 +1276,13 @@ class PlayerokClient:
                 payload = None
             # Playerok answers 502/503/504 during deploys and maintenance. Those
             # are temporary, so retry instead of treating them as a failure.
-            if (status in (0, 408) or status >= 500) and attempt < 2:
+            if retry and (status in (0, 408) or status >= 500) and attempt < 2:
                 logger.warning(
                     "GraphQL HTTP %s (%s/3), retrying", status, attempt + 1
                 )
                 await asyncio.sleep(2 + attempt * 2)
                 continue
-            if status in (401, 403) and payload is None:
+            if retry and status in (401, 403) and payload is None:
                 # A plain text 401/403 means the anti-bot page answered instead
                 # of the API. The browser check is retried once.
                 logger.info("GraphQL got %s, waiting for the browser check", status)
@@ -1335,6 +1358,8 @@ class PlayerokClient:
         query: str,
         variables: dict[str, Any] | None = None,
         operation_name: str | None = None,
+        *,
+        retry: bool = True,
     ) -> dict[str, Any]:
         endpoint = str(self.selectors.get("graphql.endpoint", "/graphql"))
         if not operation_name:
@@ -1355,6 +1380,7 @@ class PlayerokClient:
             self._absolute(endpoint),
             headers=headers,
             json_body=body,
+            retry=retry,
         )
         status = int(result.get("status") or 0)
         if status in (401, 403):
@@ -1540,6 +1566,10 @@ class PlayerokClient:
                 last_error = truncate(str(exc), 300)
                 logger.warning("publishItem failed (%s), retrying", exc)
                 await page.wait_for_timeout(10000)
+            except Exception as exc:
+                if manual_price is None:
+                    raise
+                raise PaymentUncertainError("Проверьте результат покупки в Playerok") from exc
         if data is None:
             return BoostOutcome(
                 status="deferred",
@@ -1650,6 +1680,26 @@ class PlayerokClient:
             outcome.amount = premium_price
         return outcome
 
+    async def manual_premium(
+        self, page: Page, item: ItemInfo, budget: Decimal, dry_run: bool
+    ) -> BoostOutcome:
+        if item.status != "APPROVED" or item.priority == "PREMIUM":
+            return BoostOutcome("skipped", None, "main", "Уже премиум или снято с продажи")
+        options = await self._priority_options(page, item)
+        premium = next((row for row in options if row.get("type") == "PREMIUM"), {})
+        price = parse_money(premium.get("price"))
+        if not premium.get("id") or price is None or price < 0:
+            return BoostOutcome("skipped", None, "main", "Стоимость премиума недоступна")
+        if price > budget:
+            return BoostOutcome("skipped", price, "main", "Превышен лимит")
+        if dry_run:
+            return BoostOutcome("preview", price, "main", "Тестовый режим")
+        balance = await self.fetch_balance(page)
+        if balance is None or price > balance:
+            return BoostOutcome("skipped", price, "main", "Недостаточно доступного баланса")
+        await self._before_action()
+        return await self.increase_priority(page, item.id, premium["id"], manual_price=price)
+
     async def increase_priority(
         self,
         page: Page,
@@ -1657,6 +1707,7 @@ class PlayerokClient:
         priority_id: str,
         *,
         keep_in_sale: bool = False,
+        manual_price: Decimal | None = None,
     ) -> BoostOutcome:
         """Buy the premium for a listing that is already published.
 
@@ -1679,12 +1730,19 @@ class PlayerokClient:
                         }
                     },
                     operation_name="increaseItemPriorityStatus",
+                    retry=manual_price is None,
                 )
                 break
             except PlayerokError as exc:
+                if manual_price is not None:
+                    raise PaymentUncertainError("Проверьте результат покупки в Playerok") from exc
                 last_error = truncate(str(exc), 300)
                 logger.warning("increaseItemPriorityStatus failed (%s)", exc)
                 await page.wait_for_timeout(10000)
+            except Exception as exc:
+                if manual_price is None:
+                    raise
+                raise PaymentUncertainError("Проверьте результат покупки в Playerok") from exc
         if data is None:
             return BoostOutcome(
                 status="deferred",
@@ -1693,6 +1751,12 @@ class PlayerokClient:
                 reason=last_error or "Playerok не принял покупку премиума",
             )
         result = data.get("increaseItemPriorityStatus")
+        if manual_price is not None and (
+            not isinstance(result, dict)
+            or result.get("priority") != "PREMIUM"
+            or result.get("id") != item_id
+        ):
+            raise PaymentUncertainError("Playerok не подтвердил премиум")
         if not isinstance(result, dict):
             return BoostOutcome(
                 status="deferred",
@@ -1713,7 +1777,7 @@ class PlayerokClient:
             )
         return BoostOutcome(
             status="success",
-            amount=None,
+            amount=manual_price,
             source="main",
             reason=None,
         )

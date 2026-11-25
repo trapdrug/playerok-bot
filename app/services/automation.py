@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import html
 import logging
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any, Awaitable, Callable
@@ -33,7 +34,7 @@ from app.services.audit import AuditService
 from app.services.cookies import CookieService
 from app.services.notifications import NotificationService
 from app.services.settings import SettingsService
-from app.utils.parsing import truncate, utcnow
+from app.utils.parsing import money, truncate, utcnow
 
 
 logger = logging.getLogger(__name__)
@@ -109,6 +110,50 @@ class AutomationService:
         else:
             self._stop_event.clear()
         await self._warn_about_uncertain_operations()
+
+    @asynccontextmanager
+    async def manual_session(self):
+        async with self._lock:
+            cookies = await self.cookies.get_cookies()
+            if not cookies:
+                raise PlayerokError("Загрузите cookies Playerok.")
+            async with self.client.page_session(cookies) as page:
+                session = await self.client.check_session(page)
+                if not session.user_id:
+                    raise PlayerokError("Не удалось определить продавца.")
+                yield page, session.user_id
+
+    async def boost_selected(self, seller_id, selected, dry_run, actor):
+        async with self.manual_session() as (page, current_id):
+            if current_id != seller_id:
+                raise PlayerokError("Аккаунт Playerok сменился. Откройте список заново.")
+            available = await self.client.active_listings(page, current_id)
+            for slug, title in selected:
+                settings = await self.settings.get()
+                if self.is_stopped or settings.stopped or settings.dry_run != dry_run:
+                    raise PlayerokError("Бот остановлен или режим изменился.")
+                if slug not in available:
+                    yield f"{title} — снято с продажи"
+                    continue
+                item = await self.client.fetch_item(page, slug)
+                remaining = await self.settings.remaining_boost_budget()
+                single_limit = settings.max_boost_amount or remaining
+                try:
+                    outcome = await self.client.manual_premium(
+                        page, item, min(remaining, single_limit), dry_run
+                    )
+                except PaymentUncertainError:
+                    await self.request_stop(f"Проверьте оплату премиума для «{title}»", actor)
+                    raise
+                if outcome.status == "success":
+                    await self.settings.record_boost_spend(outcome.amount)
+                    result = f"✅ Премиум · {money(outcome.amount)}"
+                elif outcome.status == "preview":
+                    result = f"🧪 Тест · {money(outcome.amount)}"
+                else:
+                    result = outcome.reason
+                await self.audit.log("manual_boost", f"{title}: {result}", user=actor)
+                yield f"{title} — {result}"
 
     async def run_cycle(self) -> None:
         if self._lock.locked():
@@ -947,6 +992,8 @@ class AutomationService:
                 source="main",
                 reason="Объявление недоступно на Playerok",
             )
+        if item.priority == "PREMIUM":
+            return BoostOutcome("success", Decimal("0"), "main", "Премиум уже активен")
         try:
             return await self.client.boost_listing(
                 page,

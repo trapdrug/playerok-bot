@@ -26,6 +26,7 @@ def main_menu(user: User) -> InlineKeyboardMarkup:
         )
     rows: list[list[InlineKeyboardButton]] = [
         [_btn("⚙️ Настройки", "menu:settings"), _btn("📊 Статус", "menu:status")],
+        [_btn("🚀 Буст", "menu:boost")],
         [_btn("📜 Логи", "menu:logs"), _btn("🛑 Стоп всё", "stop_all")],
     ]
     if user.is_main_admin:
