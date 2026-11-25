@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from aiogram import F, Router
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 
-from app.bot.helpers import require_automation_cb, safe_answer
+from app.bot.helpers import require_user_cb, safe_answer
 from app.bot.keyboards import back_menu
 from app.context import AppContext
 from app.models import User
@@ -61,7 +61,7 @@ selections: dict[int, Selection] = {}
 
 @router.callback_query(F.data == "menu:boost")
 async def open_boost(callback: CallbackQuery, ctx: AppContext, user: User | None):
-    if not await require_automation_cb(callback, user):
+    if not await require_user_cb(callback, user):
         return
     await safe_answer(callback)
     await callback.message.edit_text("Загружаю объявления Playerok…")
@@ -84,7 +84,7 @@ async def open_boost(callback: CallbackQuery, ctx: AppContext, user: User | None
 
 @router.callback_query(F.data.startswith("mb:"))
 async def select_boost(callback: CallbackQuery, ctx: AppContext, user: User | None):
-    if not await require_automation_cb(callback, user):
+    if not await require_user_cb(callback, user):
         return
     owner = callback.from_user.id
     selection = selections.get(owner)

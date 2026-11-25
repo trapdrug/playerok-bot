@@ -43,7 +43,8 @@ def build_help_text(user: User | None) -> str:
             "/cancel — отменить ввод пароля",
             "",
             "<b>Роль: работник</b>",
-            "Доступны только личные уведомления: новые продажи и сообщения "
+            "В главном меню нажмите «🚀 Буст», чтобы выбрать объявления и купить премиум.",
+            "Личные уведомления сообщают о новых продажах и сообщениях "
             "в чате Playerok.",
         ]
         return "\n".join(lines)
@@ -67,7 +68,7 @@ def build_help_text(user: User | None) -> str:
             "Отправьте JSON-файл с cookies — бот сохранит его в зашифрованном виде",
             "/accounts — список аккаунтов",
             "/create_account логин пароль [user|worker] — создать аккаунт",
-            "/create_worker логин пароль — создать работника (только уведомления)",
+            "/create_worker логин пароль — создать работника (ручной буст и уведомления)",
             "/delete_account логин — удалить аккаунт",
             "/disable_account логин — отключить аккаунт",
             "/enable_account логин — включить аккаунт",
@@ -162,7 +163,7 @@ def build_accounts_text(users: list[User]) -> str:
         if user.is_main_admin:
             role = "гл. админ"
         elif user.is_worker:
-            role = "👷 работник (только уведомления)"
+            role = "👷 работник (ручной буст и уведомления)"
         else:
             role = "пользователь"
         status = "✅" if user.is_active else "⛔"

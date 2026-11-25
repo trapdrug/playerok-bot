@@ -63,3 +63,39 @@ async def test_manual_purchase_does_not_resubmit_on_lost_response():
         await PlayerokClient.increase_priority(client, None, "item", "premium", manual_price=Decimal("10"))
     client._graphql.assert_awaited_once()
     assert client._graphql.await_args.kwargs["retry"] is False
+
+
+@pytest.mark.asyncio
+async def test_worker_can_open_select_and_submit_boost():
+    from contextlib import asynccontextmanager
+
+    from app.bot.handlers.boost import open_boost, select_boost
+    from app.bot.keyboards import main_menu
+    from app.models import User
+
+    worker = User(role="worker", telegram_id=42, is_active=True)
+    menu = main_menu(worker).inline_keyboard
+    assert any(button.callback_data == "menu:boost" for row in menu for button in row)
+
+    @asynccontextmanager
+    async def session():
+        yield None, "seller"
+
+    async def purchase(seller, selected, dry_run, actor):
+        assert (seller, selected, dry_run, actor) == ("seller", [("slug", "Gift")], False, worker)
+        yield "Gift — ✅"
+
+    ctx = Mock()
+    ctx.automation.manual_session = session
+    ctx.automation.boost_selected = purchase
+    ctx.client.active_listings = AsyncMock(return_value={"slug": "Gift"})
+    ctx.settings.get = AsyncMock(return_value=SimpleNamespace(dry_run=False))
+    callback = AsyncMock()
+    callback.from_user.id = worker.telegram_id
+    await open_boost(callback, ctx, worker)
+    rows = callback.message.edit_text.await_args.kwargs["reply_markup"].inline_keyboard
+    callback.data = rows[0][0].callback_data
+    await select_boost(callback, ctx, worker)
+    callback.data = rows[-2][0].callback_data
+    await select_boost(callback, ctx, worker)
+    assert callback.message.edit_text.await_args.args == ("Gift — ✅",)

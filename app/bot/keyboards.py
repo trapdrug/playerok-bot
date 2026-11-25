@@ -21,6 +21,7 @@ def main_menu(user: User) -> InlineKeyboardMarkup:
     if user.is_worker:
         return InlineKeyboardMarkup(
             inline_keyboard=[
+                [_btn("🚀 Буст", "menu:boost")],
                 [_btn("🔔 Мои уведомления", "menu:settings")],
             ]
         )

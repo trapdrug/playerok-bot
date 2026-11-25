@@ -111,7 +111,7 @@ async def cb_toggle(
 
     if user is not None and not user.can_manage_automation:
         await safe_answer(callback, 
-            "Работнику доступны только личные уведомления.", show_alert=True
+            "Из настроек работнику доступны личные уведомления.", show_alert=True
         )
         return
 

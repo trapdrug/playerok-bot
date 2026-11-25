@@ -62,7 +62,7 @@ async def require_admin_cb(callback: CallbackQuery, user: User | None) -> bool:
 
 
 WORKER_DENIED = (
-    "❌ Работнику доступны только личные уведомления "
+    "❌ Работнику доступны ручной буст и личные уведомления "
     "(включение и выключение через /settings)."
 )
 
